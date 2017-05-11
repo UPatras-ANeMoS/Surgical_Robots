@@ -1,0 +1,27 @@
+<launch>
+  <node pkg="uvc_camera" type="base_camera_node" name="base_uvc_camera" output="screen">
+    <param name="width" type="int" value="1280" />
+    <param name="height" type="int" value="1024" />
+    <param name="fps" type="int" value="10" />
+    <param name="format" value="yuyv" />
+    <param name="frame" type="string" value="webcam" />
+
+    <!-- other supported params: auto_exposure, exposure_absolute, brightness, power_line_frequency -->
+	 <!-- <param name="power_line_frequency" value="60" /> -->
+	 <param name="exposure_auto_priority" value="0" />
+ 	  <param name="auto_exposure" value="3" />
+     <!-- <param name="exposure_absolute" value="166" /> -->
+      <param name="auto_white_balance" value="true"/>
+      <param name="backlight_compensation" value="0"/>
+      <param name="brightness" value="100"/>
+      <param name="gain" value="0"/>
+      <param name="contrast" value="32"/>
+      <param name="saturation" value="31" />
+	  <param name="sharpness" value="130" />
+
+    <param name="device" type="string" value="/dev/v4l/by-id/usb-046d_0805_F56B8C60-video-index0" />
+    <param name="camera_info_url" type="string" value="file:///home/odroid/ros_SMArobot/src/camera_grab/yaml_files/yaml2/cam_aruco.yaml" />
+	<remap from="image_raw" to="base/image_raw" />
+	<remap from="camera_info" to="base/camera_info" />
+  </node>
+</launch>

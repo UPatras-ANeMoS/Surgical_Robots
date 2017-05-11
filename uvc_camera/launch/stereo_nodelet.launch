@@ -1,0 +1,29 @@
+<launch>
+  <node pkg="nodelet" type="nodelet" name="camera_process" args="manager" output="screen"/>
+
+  <node pkg="nodelet" type="nodelet" name="uvc_camera_stereo" args="load uvc_camera/StereoNodelet /camera_process" output="screen">
+    <param name="width" type="int" value="1280" />
+    <param name="height" type="int" value="720" />
+    <param name="fps" type="int" value="10" />
+	<param name="video_mode" value="yuyv"/> <!-- or yuyv/nv12/jpeg -->
+    <!-- <param name="frame" type="string" value="wide_stereo" /> -->
+
+
+ 	  <param name="auto_exposure" value="3"/> <!-- use aperture_priority auto exposure -->
+      <param name="auto_white_balance" value="false"/>
+      <param name="backlight_compensation" value="0"/>
+      <param name="brightness" value="150"/>
+      <param name="gain" value="3"/>
+      <param name="contrast" value="0"/>
+    <!-- other supported params: auto_exposure, exposure_absolute, brightness, power_line_frequency -->
+
+    <param name="left/device" type="string" value="/dev/v4l/by-id/usb-046d_0805_ABCAC170-video-index0" />
+	<param name="left/camera_info_url" type="string" value="file:///home/odroid/ros_Imaging_tet/src/camera_grab/src/cam_aruco.yaml"/>
+	<remap from="left/image_raw" to="base/image_raw" />
+	<remap from="left/camera_info" to="base/camera_info" />
+    <param name="right/device" type="string" value="/dev/v4l/by-id/usb-046d_0805_F56B8C60-video-index0" />
+    <param name="right/camera_info_url" type="string" value="file:///home/odroid/ros_Imaging_tet/src/camera_grab/src/cam_aruco.yaml"/>
+		<remap from="right/image_raw" to="robot/image_raw" />
+	<remap from="right/camera_info" to="robot/camera_info" />
+  </node>
+</launch>

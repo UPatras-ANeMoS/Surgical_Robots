@@ -1,0 +1,14 @@
+gia na paraksw apo to etoimo gui mou to ros injected gui pira to cmake opws paraxthike
+apo to 
+qt_ros package kai to tropopoiisa elaxista
+epeidi xrismipoiei qt4 eprepe na allaksw to qcustomplot opws fainetai sto:
+http://wiki.ros.org/qt_ros/Tutorials/Mixing%20Qt%20and%20Boost%20Signals
+stin paragrafo gia 4.1 fuerte omoiws kai sto mainwindow!
+:)
+
+http://wiki.ros.org/qt_create
+
+///EIDIKA GIA ODROID-XU4 ME EGKATASTIMENO TO QT5
+1)apo synaptic psaxnw gia "cmake" kai egkathistw ros-kinetic-qt-build kai ros-kinetic-qt-ros (+additional packages)
+2)meta kanw oti leei sto: http://stackoverflow.com/questions/15455178/qt4-cgal-parse-error-at-boost-join...
+ousiastika prosthetw sto usr/include/boost/type_traits/detail/has_binary_operator.hpp stin arxi to #ifndef Q_MOC_RUN kai sto telos to #endif
