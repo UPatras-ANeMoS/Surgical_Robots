@@ -1,0 +1,965 @@
+/*******************************************************************************
+* Copyright (c) 2016, ROBOTIS CO., LTD.
+* All rights reserved.
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+*
+* * Redistributions of source code must retain the above copyright notice, this
+*   list of conditions and the following disclaimer.
+*
+* * Redistributions in binary form must reproduce the above copyright notice,
+*   this list of conditions and the following disclaimer in the documentation
+*   and/or other materials provided with the distribution.
+*
+* * Neither the name of ROBOTIS nor the names of its
+*   contributors may be used to endorse or promote products derived from
+*   this software without specific prior written permission.
+*
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+* AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+* IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+* DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+* FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+* DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+* SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+* CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+* OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*******************************************************************************/
+
+/*Version 0.1 by Nick Evangeliou*/
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+//DXL STUFF
+#include "dynamixel_sdk/dynamixel_sdk.h"                                 // Uses Dynamixel SDK library
+//#include "dynamixel_sdk/dxl_defs.h"
+#include "dynamixel_sdk/dxl_functions.h"
+uint8_t num_actuators=NUM_ACTUATORS1+NUM_ACTUATORS2;
+dynamixel_motor* dxl_motor=new dynamixel_motor[num_actuators];
+uint8_t dxl_error1,dxl_error2;
+int dxl_comm_result1,dxl_comm_result2;
+dynamixel::PortHandler      *portHandler1,*portHandler2;
+dynamixel::PacketHandler    *packetHandler1,*packetHandler2;
+dynamixel::GroupBulkRead    *groupBulkRead1,*groupBulkRead2;
+dynamixel::GroupBulkWrite   *groupBulkWrite1,*groupBulkWrite2;
+bool dxl_addparam_result1,dxl_addparam_result2;
+bool dxl_getdata_result1,dxl_getdata_result2;
+dynamixel::GroupSyncRead    *groupSyncRead1,*groupSyncRead2;
+dynamixel::GroupSyncWrite   *groupSyncWrite1,*groupSyncWrite2;
+
+//TEENSY SERIAL
+#include "dynamixel_sdk/teensy_serial.h"
+#define SPEED 0
+#define BIN 6
+#define BOUT 1
+#define PORT "/dev/Teensy"
+cserial_board* myserial;
+
+//ROS STUFF
+#include "ros/ros.h"
+#include "std_msgs/Float32MultiArray.h"
+#include "std_msgs/UInt32MultiArray.h"
+#include "std_msgs/Int8MultiArray.h"
+#include "std_msgs/String.h"
+#include <sstream>
+#define RATE 500 //Hz
+
+uint8_t end_program=0;
+
+int getch()
+{
+#ifdef __linux__
+  struct termios oldt, newt;
+  int ch;
+  tcgetattr(STDIN_FILENO, &oldt);
+  newt = oldt;
+  newt.c_lflag &= ~(ICANON | ECHO);
+  tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+  ch = getchar();
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+  return ch;
+#elif defined(_WIN32) || defined(_WIN64)
+  return _getch();
+#endif
+}
+
+
+int kbhit(char* c)
+{
+#ifdef __linux__
+  struct termios oldt, newt;
+  int ch;
+  int oldf;
+
+  tcgetattr(STDIN_FILENO, &oldt);
+  newt = oldt;
+  newt.c_lflag &= ~(ICANON | ECHO);
+  tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+  oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+  fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
+  ch = getchar();
+
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+  fcntl(STDIN_FILENO, F_SETFL, oldf);
+
+  if (ch != EOF)
+  {
+    //ungetc(ch, stdin);
+    *c=ch;
+    return 1;
+  }
+
+  return 0;
+#elif defined(_WIN32) || defined(_WIN64)
+  return _kbhit();
+#endif
+}
+
+bool init_process(){
+    // Initialize PortHandler instance
+    // Set the port path
+    // Get methods and members of PortHandlerLinux or PortHandlerWindows
+    portHandler1=dynamixel::PortHandler::getPortHandler(DEVICENAME1);
+    portHandler2=dynamixel::PortHandler::getPortHandler(DEVICENAME2);
+    // Initialize PacketHandler instance
+    // Set the protocol version
+    // Get methods and members of Protocol1PacketHandler or Protocol2PacketHandler
+    packetHandler1=dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
+    packetHandler2 = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
+    dxl_addparam_result1=dxl_addparam_result2= false;                // addParam result
+    dxl_getdata_result1=dxl_getdata_result2= false;
+    //errors
+    dxl_error1=dxl_error2= 0;                          // Dynamixel error
+    dxl_comm_result1=dxl_comm_result2= COMM_TX_FAIL;             // Communication result
+
+    //-------------------------------------------------------------------------
+    //START TEENSY----------------------------------------------------------
+    //-------------------------------------------------------------------------
+    //INIT SERIAL PORT
+    char* port=new char[20];
+    strcpy(port,PORT);
+    myserial=new cserial_board(port, SPEED, BIN, BOUT);
+    bool ret2=false;
+    if(myserial->cserial_open()>0){
+       myserial->ch_out[0]='!';
+       myserial->ch_in[0]=myserial->ch_in[1]=1;
+       myserial->ch_in[2]=myserial->ch_in[3]=myserial->ch_in[4]=myserial->ch_in[5]=0;
+       ROS_INFO("Teensy ready");
+       if(myserial->cserial_write()>0){
+           //serial read attempt
+           if (myserial->cserial_read()){
+                ROS_INFO("Teensy first read success");
+                ret2=true;
+           }
+       }
+       if(myserial->cserial_write()>0){
+           //serial read attempt
+           if (myserial->cserial_read()){
+                ROS_INFO("Teensy first read success");
+                ret2=true;
+           }
+       }
+       if(myserial->cserial_write()>0){
+           //serial read attempt
+           if (myserial->cserial_read()){
+                ROS_INFO("Teensy first read success");
+                ret2=true;
+           }
+       }
+    }
+    else{
+        ROS_INFO("Failed to find Teensy");
+    }
+    if(!ret2) return false;
+    //return false;
+    //-------------------------------------------------------------------------
+    //START USB2RS485----------------------------------------------------------
+    //-------------------------------------------------------------------------
+    // Open port1
+    if (portHandler1->openPort())   ROS_INFO("Succeeded to open the port!");
+    else{
+      ROS_INFO("Failed to open port 1!");
+      return false;
+    }
+    // Open port2
+    if (portHandler2->openPort())   ROS_INFO("Succeeded to open the port!");
+    else{
+      ROS_INFO("Failed to open port 2!");
+      return false;
+    }
+    // Set port1 baudrate
+    if (portHandler1->setBaudRate(BAUDRATE))    ROS_INFO("Succeeded to change the baudrate!");
+    else{
+      ROS_INFO("Failed to change the baudrate of port 1!");
+      return false;
+    }
+    // Set port2 baudrate
+    if (portHandler2->setBaudRate(BAUDRATE))    ROS_INFO("Succeeded to change the baudrate!");
+    else{
+      ROS_INFO("Failed to change the baudrate of port 2!");
+      return false;
+    }
+
+    //-------------------------------------------------------------------------
+    //SET STARTUP SETTINGS OF DYNAMIXEL----------------------------------------
+    //-------------------------------------------------------------------------
+    //for usb DXL1
+    //Torque enable -- Verify connection
+    for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+        dxl_comm_result1 = packetHandler1->write1ByteTxRx(portHandler1, DXL1_ID, ADDR_MX_TORQUE_ENABLE, TORQUE_ENABLE, &dxl_error1);
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS){
+          packetHandler1->printTxRxResult(dxl_comm_result1);
+        }
+        else if (dxl_error1 != 0){
+          packetHandler1->printRxPacketError(dxl_error1);
+        }
+        else{
+          ROS_INFO("Dynamixel#%d has been successfully connected ", DXL1_ID);
+          dxl_motor[DXL1_ID-1].health=1;
+        }
+    }
+    //SYNC WRITE POSITION CONTROL, PID, ACCELERATION, SPEED, TORQUE for DXL1
+    //SET POSITION CONTROL
+    dxl_addparam_result1=true;
+    dynamixel::GroupSyncWrite temp10(portHandler1, packetHandler1, (uint16_t) P_CCW , (uint16_t) 2);
+    for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+        if(dxl_motor[DXL1_ID-1].health==1){
+            uint16_t high_value=4095;
+            uint8_t high[2]={DXL_LOBYTE(high_value),DXL_HIBYTE(high_value)};
+            dxl_addparam_result1 = dxl_addparam_result1 && temp10.addParam(DXL1_ID, high);
+            if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL1_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL1_ID);
+    }
+    if(dxl_addparam_result1){
+        dxl_comm_result1 = temp10.txPacket();
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+        else{
+            dynamixel::GroupSyncWrite temp11(portHandler1, packetHandler1, (uint16_t) P_CW , (uint16_t) 2);
+            for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+                    uint16_t low_value=0;
+                    uint8_t low[2]={DXL_LOBYTE(low_value),DXL_HIBYTE(low_value)};
+                    dxl_addparam_result1 = dxl_addparam_result1 && temp11.addParam(DXL1_ID, low);
+                    if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+                    else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL1_ID);
+            }
+            if(dxl_addparam_result1){
+                dxl_comm_result1 = temp11.txPacket();
+                if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+                else	ROS_INFO("Succesfully applied P param for all DXL1 %d",dxl_comm_result1);
+                // Clear syncwrite parameter storage
+                temp11.clearParam();
+            }
+        }
+        // Clear syncwrite parameter storage
+        temp10.clearParam();
+    }
+    else{
+        ROS_INFO("Problem setting position control in DXL1 servos");
+    }
+    //SET P value
+    dxl_addparam_result1=true;
+    dynamixel::GroupSyncWrite temp(portHandler1, packetHandler1, (uint16_t) P_P , (uint16_t) 1);
+    for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+        if(dxl_motor[DXL1_ID-1].health==1){
+            dxl_addparam_result1 = dxl_addparam_result1 && temp.addParam(DXL1_ID, &dxl_motor[DXL1_ID-1].P);
+            if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL1_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL1_ID);
+    }
+    if(dxl_addparam_result1){
+        dxl_comm_result1 = temp.txPacket();
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+        else	ROS_INFO("Succesfully applied P param for all DXL1 %d",dxl_comm_result1);
+        // Clear syncwrite parameter storage
+        temp.clearParam();
+    }
+    //SET I value
+    dxl_addparam_result1=true;
+    dynamixel::GroupSyncWrite temp1(portHandler1, packetHandler1, (uint16_t) P_I , (uint16_t) 1);
+    for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+        if(dxl_motor[DXL1_ID-1].health==1){
+            dxl_addparam_result1 = dxl_addparam_result1 && temp1.addParam(DXL1_ID, &dxl_motor[DXL1_ID-1].I);
+            if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL1_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL1_ID);
+    }
+    if(dxl_addparam_result1){
+        dxl_comm_result1 = temp1.txPacket();
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+        else	ROS_INFO("Succesfully applied I param for all DXL1 %d",dxl_comm_result1);
+        // Clear syncwrite parameter storage
+        temp1.clearParam();
+    }
+    //SET D value
+    dxl_addparam_result1=true;
+    dynamixel::GroupSyncWrite temp2(portHandler1, packetHandler1, (uint16_t) P_D , (uint16_t) 1);
+    //groupSyncWrite1=&temp;
+    for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+        if(dxl_motor[DXL1_ID-1].health==1){
+            dxl_addparam_result1 = dxl_addparam_result1 && temp2.addParam(DXL1_ID, &dxl_motor[DXL1_ID-1].D);
+            if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL1_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL1_ID);
+    }
+    if(dxl_addparam_result1){
+        dxl_comm_result1 = temp2.txPacket();
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+        else	ROS_INFO("Succesfully applied D param for all DXL1 %d",dxl_comm_result1);
+        // Clear syncwrite parameter storage
+        temp2.clearParam();
+    }
+    //SET ACCELERATION value
+    dxl_addparam_result1=true;
+    dynamixel::GroupSyncWrite temp3(portHandler1, packetHandler1, (uint16_t) P_ACCELERATION , (uint16_t) 1);
+   //groupSyncWrite1=&temp;
+    for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+        if(dxl_motor[DXL1_ID-1].health==1){
+            dxl_addparam_result1 = dxl_addparam_result1 && temp3.addParam(DXL1_ID, &dxl_motor[DXL1_ID-1].acceleration);
+            if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL1_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL1_ID);
+    }
+    if(dxl_addparam_result1){
+        dxl_comm_result1 = temp3.txPacket();
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+        else	ROS_INFO("Succesfully applied acceleration param for all DXL1 %d",dxl_comm_result1);
+        // Clear syncwrite parameter storage
+        temp3.clearParam();
+    }
+    //SET VELOCITY VALUE
+    dxl_addparam_result1=true;
+    dynamixel::GroupSyncWrite temp4(portHandler1, packetHandler1, (uint16_t) P_SPEED_L , (uint16_t) 2);
+    for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+        if(dxl_motor[DXL1_ID-1].health==1){
+            uint8_t param_speed[2];
+            param_speed[0]=DXL_LOBYTE(dxl_motor[DXL1_ID-1].speed);
+            param_speed[1]=DXL_HIBYTE(dxl_motor[DXL1_ID-1].speed);
+            dxl_addparam_result1 = dxl_addparam_result1 && temp4.addParam(DXL1_ID, param_speed);
+            if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL1_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL1_ID);
+    }
+    if(dxl_addparam_result1){
+        dxl_comm_result1 = temp4.txPacket();
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+        else	ROS_INFO("Succesfully applied speed param for all DXL1 %d",dxl_comm_result1);
+        // Clear syncwrite parameter storage
+        temp4.clearParam();
+    }
+    //for usb DXL2
+    //Torque enable -- Verify connection
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+            dxl_comm_result2 = packetHandler2->write1ByteTxRx(portHandler2, DXL2_ID, ADDR_MX_TORQUE_ENABLE, TORQUE_ENABLE, &dxl_error2);
+            usleep(10);
+            if (dxl_comm_result2 != COMM_SUCCESS){
+              packetHandler2->printTxRxResult(dxl_comm_result2);
+            }
+            else if (dxl_error2 != 0){
+              packetHandler2->printRxPacketError(dxl_error2);
+            }
+            else{
+              ROS_INFO("Dynamixel#%d has been successfully connected", DXL2_ID);
+              dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health=1;
+            }
+    }
+    //SYNC WRITE POSITION CONTROL MODE+ PID, ACCELERATION, SPEED, TORQUE for DXL2
+    //SET POS CONTROL MODE
+    dxl_addparam_result2=true;
+    dynamixel::GroupSyncWrite temp12(portHandler2, packetHandler2, (uint16_t) P_CCW , (uint16_t) 2);
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+        if(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health==1){
+            uint16_t high_value2=4095;
+            uint8_t high2[2]={DXL_LOBYTE(high_value2),DXL_HIBYTE(high_value2)};
+            dxl_addparam_result2 = dxl_addparam_result2 && temp12.addParam(DXL2_ID, high2);
+            if(dxl_addparam_result2){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL2_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL2_ID);
+    }
+    if(dxl_addparam_result2){
+        dxl_comm_result2 = temp12.txPacket();
+        usleep(10);
+        if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+        else{
+            dynamixel::GroupSyncWrite temp13(portHandler2, packetHandler2, (uint16_t) P_CW , (uint16_t) 2);
+            for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+                    uint16_t low_value2=0;
+                    uint8_t low2[2]={DXL_LOBYTE(low_value2),DXL_HIBYTE(low_value2)};
+                    dxl_addparam_result2 = dxl_addparam_result2 && temp13.addParam(DXL2_ID, low2);
+                    if(dxl_addparam_result2){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+                    else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL2_ID);
+            }
+            if(dxl_addparam_result2){
+                dxl_comm_result2 = temp13.txPacket();
+                if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+                else	ROS_INFO("Succesfully applied P param for all DXL2 %d",dxl_comm_result1);
+                // Clear syncwrite parameter storage
+                temp13.clearParam();
+            }
+        }
+        // Clear syncwrite parameter storage
+        temp12.clearParam();
+    }
+    else{
+        ROS_INFO("Problem setting position control in DXL2 servos");
+    }
+    //SET P value
+    dxl_addparam_result2=true;
+    dynamixel::GroupSyncWrite temp5(portHandler2, packetHandler2, (uint16_t) P_P , (uint16_t) 1);
+    //groupSyncWrite1=&temp;
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+        if(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health==1){
+            dxl_addparam_result2 = dxl_addparam_result2 && temp5.addParam(DXL2_ID, &dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].P);
+            if(dxl_addparam_result2){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL2_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL2_ID);
+    }
+    if(dxl_addparam_result2){
+        dxl_comm_result2 = temp5.txPacket();
+        usleep(10);
+        if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+        else	ROS_INFO("Succesfully applied P param for all DXL2 %d",dxl_comm_result2);
+        // Clear syncwrite parameter storage
+        temp5.clearParam();
+    }
+    //SET I value
+    dxl_addparam_result2=true;
+    dynamixel::GroupSyncWrite temp6(portHandler2, packetHandler2, (uint16_t) P_I , (uint16_t) 1);
+    //groupSyncWrite1=&temp;
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+        if(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health==1){
+            dxl_addparam_result2 = dxl_addparam_result2 && temp6.addParam(DXL2_ID, &dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].I);
+            if(dxl_addparam_result2){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL2_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL2_ID);
+    }
+    if(dxl_addparam_result2){
+        dxl_comm_result2 = temp6.txPacket();
+        usleep(10);
+        if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+        else	ROS_INFO("Succesfully applied I param for all DXL2 %d",dxl_comm_result2);
+        // Clear syncwrite parameter storage
+        temp6.clearParam();
+    }
+    //SET D value
+    dxl_addparam_result2=true;
+    dynamixel::GroupSyncWrite temp7(portHandler2, packetHandler2, (uint16_t) P_D , (uint16_t) 1);
+    //groupSyncWrite1=&temp;
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+        if(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health==1){
+            dxl_addparam_result2 = dxl_addparam_result2 && temp7.addParam(DXL2_ID, &dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].D);
+            if(dxl_addparam_result2){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL2_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL2_ID);
+    }
+    if(dxl_addparam_result2){
+        dxl_comm_result2 = temp7.txPacket();
+        usleep(10);
+        if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+        else	ROS_INFO("Succesfully applied D param for all DXL2 %d",dxl_comm_result2);
+        // Clear syncwrite parameter storage
+        temp7.clearParam();
+    }
+    //SET ACCELERATION value
+    dxl_addparam_result2=true;
+    dynamixel::GroupSyncWrite temp8(portHandler2, packetHandler2, (uint16_t) P_ACCELERATION , (uint16_t) 1);
+   //groupSyncWrite1=&temp;
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+        if(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health==1){
+            dxl_addparam_result2 = dxl_addparam_result2 && temp8.addParam(DXL2_ID, &dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].acceleration);
+            if(dxl_addparam_result2){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL2_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL2_ID);
+    }
+    if(dxl_addparam_result2){
+        dxl_comm_result2 = temp8.txPacket();
+        usleep(10);
+        if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+        else	ROS_INFO("Succesfully applied acceleration param for all DXL2 %d",dxl_comm_result2);
+        // Clear syncwrite parameter storage
+        temp8.clearParam();
+    }
+    //SET VELOCITY VALUE
+    dxl_addparam_result2=true;
+     dynamixel::GroupSyncWrite temp9(portHandler2, packetHandler2, (uint16_t) P_SPEED_L , (uint16_t) 2);
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+        if(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health==1){
+            uint8_t param_speed1[2];
+            param_speed1[0]=DXL_LOBYTE(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].speed);
+            param_speed1[1]=DXL_HIBYTE(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].speed);
+            dxl_addparam_result2 = dxl_addparam_result2 && temp9.addParam(DXL2_ID, param_speed1);
+            if(dxl_addparam_result2){} //ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL2_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL2_ID);
+    }
+    if(dxl_addparam_result2){
+        dxl_comm_result2 = temp9.txPacket();
+        usleep(10);
+        if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+        else	ROS_INFO("Succesfully applied speed param for all DXL2 %d",dxl_comm_result2);
+        // Clear syncwrite parameter storage
+        temp9.clearParam();
+    }
+    return true;
+}
+
+bool startup_position(){
+    //SET ALL DXL_MOTORS TO THEIR STARTUP POSITION
+    //START BY SETTING VELOCITY CONTROL MODE TO RESPECTIVE MOTORS AKA 1,2 AND 5
+    //1+2
+    dxl_addparam_result1=true;
+    dxl_comm_result1=100; //dummy
+    dynamixel::GroupSyncWrite temp(portHandler1, packetHandler1, (uint16_t) P_CCW , (uint16_t) 2);
+    for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+        if(dxl_motor[DXL1_ID-1].health==1){
+            uint16_t high_value=0;
+            uint8_t high[2]={DXL_LOBYTE(high_value),DXL_HIBYTE(high_value)};
+            dxl_addparam_result1 = dxl_addparam_result1 && temp.addParam(DXL1_ID, high);
+            if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL1_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL1_ID);
+    }
+    if(dxl_addparam_result1){
+        dxl_comm_result1 = temp.txPacket();
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+        else{
+            dynamixel::GroupSyncWrite temp1(portHandler1, packetHandler1, (uint16_t) P_CW , (uint16_t) 2);
+            for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+                    uint16_t low_value=0;
+                    uint8_t low[2]={DXL_LOBYTE(low_value),DXL_HIBYTE(low_value)};
+                    dxl_addparam_result1 = dxl_addparam_result1 && temp1.addParam(DXL1_ID, low);
+                    if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL1_ID);
+                    else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL1_ID);
+            }
+            if(dxl_addparam_result1){
+                dxl_comm_result1 = temp1.txPacket();
+                usleep(10);
+                if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+                else	ROS_INFO("Succesfully applied velocity mode for all DXL1 %d",dxl_comm_result1);
+                // Clear syncwrite parameter storage
+                temp1.clearParam();
+            }
+        }
+        // Clear syncwrite parameter storage
+        temp.clearParam();
+    }
+    else{
+        ROS_INFO("Problem setting position control in DXL1 servos");
+    }
+    //5
+    dxl_addparam_result2=true;
+    dxl_comm_result2=100; //dummy
+    if(dxl_motor[4].health==1){
+        dxl_comm_result2 = packetHandler2->write2ByteTxRx(portHandler2, 3, P_CCW, 0, &dxl_error2);
+        usleep(10);
+        if (dxl_comm_result2 != COMM_SUCCESS)   packetHandler2->printTxRxResult(dxl_comm_result2);
+        else if (dxl_error2 != 0)   packetHandler2->printRxPacketError(dxl_error2);
+        else{
+            dxl_comm_result2 = packetHandler2->write2ByteTxRx(portHandler2, 3, P_CW, 0, &dxl_error2);
+            usleep(10);
+            if (dxl_comm_result2 != COMM_SUCCESS)   packetHandler2->printTxRxResult(dxl_comm_result2);
+            else if (dxl_error2 != 0)   packetHandler2->printRxPacketError(dxl_error2);
+            else{
+                ROS_INFO("Succesfully applied velocity mode for dynamixel 5");
+            }
+        }
+    }
+    //START MOTION 5 first!
+    bool ret=false;
+    //read teensy vals
+    if(myserial->cserial_write()>0){
+        //serial read attempt
+        if (!myserial->cserial_read()){ROS_INFO("Teensy error read!");}
+        else ret=true;
+    }
+    else{ROS_INFO("Teensy error write!"); return false;}
+
+    if(ret && dxl_addparam_result2 && dxl_addparam_result1 && dxl_comm_result2==COMM_SUCCESS && dxl_comm_result1==COMM_SUCCESS){
+        //check for DXL1-1 if motion is neseccary
+        if(myserial->ch_in[1]!=49){
+            dxl_motor[4].speed=10;
+            dxl_comm_result2 = packetHandler2->write2ByteTxRx(portHandler2, dxl_motor[4].ID, P_SPEED_L, dxl_motor[4].speed, &dxl_error2);
+            //dxl_comm_result2 = packetHandler2->write2ByteTxRx(portHandler2, 3, P_SPEED_L, 10, &dxl_error2);
+            usleep(10);
+            if (dxl_comm_result2 != COMM_SUCCESS)  packetHandler2->printTxRxResult(dxl_comm_result2);
+            else if (dxl_error2 != 0)   packetHandler2->printRxPacketError(dxl_error2);
+            else{
+                ROS_INFO("Moving SMA cart to start position");
+                dxl_motor[4].moving=1;
+                dxl_motor[4].mode=1;
+                while(myserial->ch_in[1]!=49){
+                    if(myserial->cserial_write()){
+                    usleep(1000); //1ms
+                    if(!myserial->cserial_read()) ROS_INFO("Error read!");
+                    }
+                    else ROS_INFO("Error write!");
+                }
+                dxl_motor[4].speed=0;
+                dxl_comm_result2 = packetHandler2->write2ByteTxRx(portHandler2, dxl_motor[4].ID, P_SPEED_L, dxl_motor[4].speed, &dxl_error2);
+                //dxl_comm_result2 = packetHandler2->write2ByteTxRx(portHandler2, 3, P_SPEED_L, 0, &dxl_error2);
+                usleep(10);
+                if (dxl_comm_result2 != COMM_SUCCESS)   packetHandler2->printTxRxResult(dxl_comm_result2);
+                else if (dxl_error2 != 0)   packetHandler2->printRxPacketError(dxl_error2);
+                else{ROS_INFO("SUCCESS!"); dxl_motor[4].moving=0; dxl_motor[4].speed=0;}
+            }
+        }
+    }
+    sleep(1);
+    //3+4 - position control at fixed velocity
+    dxl_comm_result2 = packetHandler2->read2ByteTxRx(portHandler2, 1, P_PRESENT_POSITION_L, &dxl_motor[2].position, &dxl_error2);
+    usleep(10);
+    if (dxl_comm_result2 != COMM_SUCCESS)   packetHandler2->printTxRxResult(dxl_comm_result2);
+    else if (dxl_error2 != 0)   packetHandler2->printRxPacketError(dxl_error2);
+    else    ROS_INFO("DXL2-1 position is %d",(int) dxl_motor[2].position);
+    dxl_comm_result2 = packetHandler2->read2ByteTxRx(portHandler2, 2, P_PRESENT_POSITION_L, &dxl_motor[3].position, &dxl_error2);
+    usleep(10);
+    if (dxl_comm_result2 != COMM_SUCCESS)   packetHandler2->printTxRxResult(dxl_comm_result2);
+    else if (dxl_error2 != 0)   packetHandler2->printRxPacketError(dxl_error2);
+    else    ROS_INFO("DXL2-2 position is %d",(int) dxl_motor[3].position);
+    dxl_addparam_result2=true;
+    dynamixel::GroupSyncWrite temp20(portHandler2, packetHandler2, (uint16_t) P_SPEED_L , (uint16_t) 2);
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2-1;DXL2_ID++){
+        if(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health==1){
+            dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].speed=10;
+            uint8_t param_speed[2];
+            param_speed[0]=DXL_LOBYTE(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].speed);
+            param_speed[1]=DXL_HIBYTE(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].speed);
+            dxl_addparam_result2 = dxl_addparam_result2 && temp20.addParam(DXL2_ID, param_speed);
+            if(dxl_addparam_result2){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d",DXL2_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL2_ID);
+    }
+    usleep(1000);
+    if(dxl_addparam_result2){
+        dxl_comm_result2 = temp20.txPacket();
+        usleep(10);
+        if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+        else	ROS_INFO("Succesfully applied speed param = 10 for all DXL2-1 AND DXL2-2");
+        // Clear syncwrite parameter storage
+        temp20.clearParam();
+    }
+    dxl_addparam_result2=true;
+    dynamixel::GroupSyncWrite temp21(portHandler2, packetHandler2, (uint16_t) P_GOAL_POSITION_L , (uint16_t) 2);
+    for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2-1;DXL2_ID++){
+        if(dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health==1){
+            uint16_t    tmp_pos=2048;
+            uint8_t t_pos[2]={DXL_LOBYTE(tmp_pos),DXL_HIBYTE(tmp_pos)};
+            dxl_addparam_result2 = dxl_addparam_result2 && temp21.addParam(DXL2_ID, t_pos);
+            if(dxl_addparam_result2){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+            else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL2_ID);
+        }
+        else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL2_ID);
+    }
+    if(dxl_addparam_result2){
+        dxl_comm_result2 = temp21.txPacket();
+        usleep(10);
+        dxl_motor[2].moving=dxl_motor[3].moving=1;
+        ROS_INFO("Moving standing DOF to init POS");
+        if (dxl_comm_result2 != COMM_SUCCESS) packetHandler2->printTxRxResult(dxl_comm_result2);
+        else{ //check moving
+            ROS_INFO("DXL2-1&2 moving");
+            ROS_INFO("check moving");
+            if(dxl_comm_result2){
+                do{
+                    usleep(10);
+                    dxl_comm_result2 = packetHandler2->read1ByteTxRx(portHandler2, dxl_motor[2].ID, P_MOVING, &dxl_motor[2].moving, &dxl_error2);
+                    if (dxl_comm_result2 != COMM_SUCCESS)   packetHandler2->printTxRxResult(dxl_comm_result2);
+                    else if (dxl_error2 != 0)   packetHandler2->printRxPacketError(dxl_error2);
+                    else{}
+                    usleep(10);
+                    dxl_comm_result2 = packetHandler2->read1ByteTxRx(portHandler2, dxl_motor[3].ID, P_MOVING, &dxl_motor[3].moving, &dxl_error2);
+                    if (dxl_comm_result2 != COMM_SUCCESS)   packetHandler2->printTxRxResult(dxl_comm_result2);
+                    else if (dxl_error2 != 0)   packetHandler2->printRxPacketError(dxl_error2);
+                    else{}
+                }while(dxl_motor[2].moving==1 || dxl_motor[3].moving==1);
+                dxl_motor[2].position=dxl_motor[3].position=2048;
+            }
+        }
+    }
+    else{
+        ROS_INFO("Problem setting position reference in DXL2 servos");
+    }
+    temp21.clearParam();
+    ROS_INFO("Done");
+    sleep(1);
+    //1+2
+    //veolocity control is already set so moving on to motion...
+    if(ret && myserial->ch_in[3]==49 && myserial->ch_in[4]==49){//both must move
+        uint16_t vel=10;
+        dxl_addparam_result1=true;
+        dynamixel::GroupSyncWrite temp31(portHandler1, packetHandler1, P_SPEED_L , 2);
+        dxl_motor[0].speed=80;
+        dxl_motor[1].speed=1024+80;
+        for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+            if(dxl_motor[DXL1_ID-1].health==1){
+                uint8_t t_speed[2]={DXL_LOBYTE(dxl_motor[DXL1_ID-1].speed),DXL_HIBYTE(dxl_motor[DXL1_ID-1].speed)};
+                dxl_addparam_result1 = dxl_addparam_result1 && temp31.addParam(DXL1_ID, t_speed);
+                if(dxl_addparam_result1){}// ROS_INFO("Add param for Bulk write success for dynamixel %d",DXL2_ID);
+                else	ROS_INFO("Problem creating bulk write for dynamixel %d\n",DXL1_ID);
+            }
+            else	ROS_INFO("Problem with dynamixel HEALTH %d",DXL1_ID);
+        }
+        if(dxl_addparam_result1){
+            dxl_comm_result1 = temp31.txPacket();
+            usleep(10);
+            if (dxl_comm_result1 != COMM_SUCCESS) packetHandler1->printTxRxResult(dxl_comm_result1);
+            else{ //check moving
+                ROS_INFO("Moving lower DOF to init POS");
+                dxl_motor[0].moving=dxl_motor[1].moving=1;
+                if(dxl_addparam_result1 && dxl_comm_result1==COMM_SUCCESS){
+                    while(dxl_motor[0].moving==1 || dxl_motor[1].moving==1){
+                        if(myserial->cserial_write()){
+                            if(myserial->cserial_read()){
+                            if(myserial->ch_in[3]==48 && dxl_motor[0].moving==1){ //dxl1-1 has reached limit switch
+                                ROS_INFO("Stop_DXL1");
+                                dxl_motor[0].speed=0;
+                                dxl_comm_result1 = packetHandler1->write2ByteTxRx(portHandler1, dxl_motor[0].ID, P_SPEED_L, dxl_motor[0].speed, &dxl_error1);
+                                usleep(10);
+                                if (dxl_comm_result1 != COMM_SUCCESS)   packetHandler1->printTxRxResult(dxl_comm_result1);
+                                else if (dxl_error1 != 0)   packetHandler1->printRxPacketError(dxl_error1);
+                                else{ROS_INFO("SUCCESS DXL1-1!"); dxl_motor[0].moving=0;}
+                            }
+                            if(myserial->ch_in[4]==48 && dxl_motor[1].moving==1){ //dxl1-2 has reached limit switch
+                                ROS_INFO("Stop_DXL2");
+                                dxl_motor[1].speed=1024;
+                                dxl_comm_result1 = packetHandler1->write2ByteTxRx(portHandler1, dxl_motor[1].ID, P_SPEED_L, dxl_motor[1].speed, &dxl_error1);
+                                usleep(10);
+                                if (dxl_comm_result1 != COMM_SUCCESS)   packetHandler1->printTxRxResult(dxl_comm_result1);
+                                else if (dxl_error1 != 0)   packetHandler1->printRxPacketError(dxl_error1);
+                                else{ROS_INFO("SUCCESS DXL2-1!"); dxl_motor[1].moving=0;}
+                            }
+                            }
+                            else{
+                                ROS_INFO("Error read");
+                            }
+                        }
+                        else ROS_INFO("Error write!");
+                    }
+                }
+            }
+            // Clear syncwrite parameter storage
+            temp31.clearParam();
+        }
+        else{
+            ROS_INFO("Problem setting position reference in DXL2 servos");
+        }
+    }
+    else if(myserial->ch_in[3]!=48){//only dxl1-1 moves
+        dxl_motor[0].speed=80;
+        dxl_comm_result1 = packetHandler1->write2ByteTxRx(portHandler1, dxl_motor[0].ID, P_SPEED_L, dxl_motor[0].speed, &dxl_error1);
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS)   packetHandler1->printTxRxResult(dxl_comm_result1);
+        else if (dxl_error1 != 0)   packetHandler1->printRxPacketError(dxl_error1);
+        else{
+            dxl_motor[0].moving=1;
+            while(dxl_motor[0].moving==1){
+                if(myserial->cserial_write()){
+                    usleep(1000); //1ms
+                    myserial->cserial_read();
+                    if(myserial->ch_in[3]==48){ //dxl1-1 has reached limit switch
+                        ROS_INFO("Stop DXL1-1");
+                        dxl_motor[0].speed=0;
+                        dxl_comm_result1 = packetHandler1->write2ByteTxRx(portHandler1, dxl_motor[0].ID, P_SPEED_L, dxl_motor[0].speed, &dxl_error1);
+                        usleep(10);
+                        if (dxl_comm_result1 != COMM_SUCCESS)   packetHandler1->printTxRxResult(dxl_comm_result1);
+                        else if (dxl_error1 != 0)   packetHandler1->printRxPacketError(dxl_error1);
+                        else{ROS_INFO("SUCCESS DXL1-1!"); dxl_motor[0].moving=0;}
+                    }
+                }
+                else ROS_INFO("Error write!");
+            }
+        }
+    }
+    else if(myserial->ch_in[4]!=48){//only dxl1-2 moves
+        dxl_motor[1].speed=1024+80;
+        dxl_comm_result1 = packetHandler1->write2ByteTxRx(portHandler1, dxl_motor[1].ID, P_SPEED_L, dxl_motor[1].speed, &dxl_error1);
+        usleep(10);
+        if (dxl_comm_result1 != COMM_SUCCESS)   packetHandler1->printTxRxResult(dxl_comm_result1);
+        else if (dxl_error1 != 0)   packetHandler1->printRxPacketError(dxl_error1);
+        else{
+            dxl_motor[1].moving=1;
+            while(dxl_motor[1].moving==1){
+                if(myserial->cserial_write()){
+                    myserial->cserial_read();
+                    if(myserial->ch_in[4]==48){ //dxl1-2 has reached limit switch
+                        ROS_INFO("Stop DXL1-2");
+                        dxl_motor[1].speed=1024;
+                        dxl_comm_result1 = packetHandler1->write2ByteTxRx(portHandler1, dxl_motor[1].ID, P_SPEED_L, dxl_motor[1].speed, &dxl_error1);
+                        usleep(10);
+                        if (dxl_comm_result1 != COMM_SUCCESS)   packetHandler1->printTxRxResult(dxl_comm_result1);
+                        else if (dxl_error1 != 0)   packetHandler1->printRxPacketError(dxl_error1);
+                        else{ROS_INFO("SUCCESS DXL1-2!"); dxl_motor[1].moving=0;}
+                    }
+                }
+                else ROS_INFO("Error write!");
+            }
+        }
+    }
+	else if(ret && myserial->ch_in[3]==48 && myserial->ch_in[4]==48){ return true;}//both must  not move 
+    else{return false;}
+    return true;
+}
+
+bool end_process(){
+    if(DISABLE_TORQUE){
+        //STOP ALL!
+        for(uint8_t DXL1_ID=1;DXL1_ID<=NUM_ACTUATORS1;DXL1_ID++){
+            dxl_comm_result1 = packetHandler1->write1ByteTxRx(portHandler1, DXL1_ID, ADDR_MX_TORQUE_ENABLE, TORQUE_DISABLE, &dxl_error1);
+            usleep(10);
+            if (dxl_comm_result1 != COMM_SUCCESS){
+              packetHandler1->printTxRxResult(dxl_comm_result1);
+            }
+            else if (dxl_error1 != 0){
+              packetHandler1->printRxPacketError(dxl_error1);
+            }
+            else{
+              //ROS_INFO("DXL1 has been successfully disconnected ", DXL1_ID);
+              dxl_motor[DXL1_ID-1].health=0;
+            }
+        }
+        for(uint8_t DXL2_ID=1;DXL2_ID<=NUM_ACTUATORS2;DXL2_ID++){
+                dxl_comm_result2 = packetHandler2->write1ByteTxRx(portHandler2, DXL2_ID, ADDR_MX_TORQUE_ENABLE, TORQUE_DISABLE, &dxl_error2);
+                usleep(10);
+                if (dxl_comm_result2 != COMM_SUCCESS){
+                  packetHandler2->printTxRxResult(dxl_comm_result2);
+                }
+                else if (dxl_error2 != 0){
+                  packetHandler2->printRxPacketError(dxl_error2);
+                }
+                else{
+                  //ROS_INFO("DXL2 has been successfully connected", DXL2_ID);
+                  dxl_motor[NUM_ACTUATORS1+DXL2_ID-1].health=0;
+                }
+        }
+    }
+    // Close port1
+    portHandler1->closePort();
+    // Close port2
+    portHandler2->closePort();
+    // Close Teensy
+    myserial->~cserial_board();
+}
+
+void chatterCallback(const std_msgs::UInt32MultiArray::ConstPtr& dxl_in){
+    switch((int) dxl_in->data[0]){
+        case DYNAMIXEL_INIT_PROCESS:{
+                init_process();
+            break;
+        }
+        case DYNAMIXEL_START_POS_PROCESS:{
+                startup_position();
+            break;
+        }
+        case DYNAMIXEL_GO_TO_POS:{
+
+            break;
+        }
+		case DYNAMIXEL_GO_TO_POS_NOTIME:{
+			for(uint8_t i=1;i<dxl_in->data.size();i++)
+			ROS_INFO("%d",dxl_in->data[i]);
+			//check that all dynamixels have velocity control
+			for(uint8_t i=0;i<num_actuators;i++){
+				if(dxl_motor[i].mode!=1){
+				ROS_INFO("Motor %d not in velocity mode",dxl_motor[i].ID);				
+				}			
+			}
+			break;
+				
+		}
+        case DYNAMIXEL_END_PROCESS:{
+            end_program=1;
+            break;
+        }
+        case DYNAMIXEL_STATUS:{
+
+            break;
+        }
+        default:
+        break;
+    }
+}
+
+int main(int argc, char** argv){
+    ros::init(argc,argv,"myDXL_COM");
+    ros::NodeHandle dynamixel_comm; //node that receives commands for dxl and informs controller about status
+    //publish stuff
+    std_msgs::UInt32MultiArray* dynamixel_array_out=new std_msgs::UInt32MultiArray;
+    ros::Publisher dynamixel_out=dynamixel_comm.advertise<std_msgs::UInt32MultiArray>("dxl_2ctrl",2);
+    //subscribe stuff
+    ros::Subscriber dynamixel_in=dynamixel_comm.subscribe("dxl_from_ctrl",2,chatterCallback);
+    //rate
+    ros::Rate loop_rate(RATE);
+    //Initialize actuator params
+    for(uint8_t i=0;i<num_actuators;i++){
+        if(i<NUM_ACTUATORS1)  dxl_motor[i].ID=i+1;
+        else dxl_motor[i].ID=i-NUM_ACTUATORS1+1;
+        dxl_motor[i].mode=0; //always start with position control
+        dxl_motor[i].P=20;
+        dxl_motor[i].I=5;
+        dxl_motor[i].D=0;
+        dxl_motor[i].position=0;
+        dxl_motor[i].current_torque=0;
+        dxl_motor[i].current_position=0;
+        dxl_motor[i].current_velocity=0;
+        dxl_motor[i].health=0;
+        dxl_motor[i].speed=0;
+        dxl_motor[i].acceleration=2;
+        dxl_motor[i].moving=0;
+    }
+    //Deploy custom settings here
+    dxl_motor[0].acceleration=dxl_motor[1].acceleration=10;
+
+    //Start serial ports
+    if(init_process()){
+        ROS_INFO("Init process ok");
+        sleep(1);
+        if(startup_position()){
+            dynamixel_array_out->data.push_back((uint32_t) DYNAMIXEL_READY);
+            dynamixel_out.publish(*dynamixel_array_out);
+            dynamixel_array_out->data.clear();
+            ros::spinOnce();
+            loop_rate.sleep();
+            ROS_INFO("Startup process ok");
+            while(ros::ok() && !end_program){
+                char* c=new char[1];
+                if(kbhit(c)==1){
+                }
+                delete c;
+                loop_rate.sleep();
+                ros::spinOnce();
+                //end_program=1;
+            }
+        }
+    }
+    end_process();
+    ROS_INFO("end");
+    return 0;
+}

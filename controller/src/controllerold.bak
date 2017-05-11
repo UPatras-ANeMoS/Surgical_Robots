@@ -1,0 +1,74 @@
+#include "ros/ros.h"
+#include "std_msgs/Float32MultiArray.h"
+#include "std_msgs/String.h"
+#include <sstream>
+
+#define DYNAMIXEL_POSITION_CONTROL 0 //PANT/TILT ACTIVE
+#define DYNAMIXEL_VELOCITY_CONTROL 1
+#define DYNAMIXEL_INIT_PROCESS 10
+#define DYNAMIXEL_PROCEDURE_POS_CONTROL 2 //PAN/TILT INACTIVE -- ONLY ID 3 AND SMA MOVE
+#define DYNAMIXEL_END_PROCESS 3
+
+#define PROCEDURE_THETA1 2048
+#define PROCEDURE_THETA2 2048
+#define PROCEDURE_THETA3 2048
+
+int main(int argc, char** argv){
+ 	ros::init(argc,argv,"controller");
+  	ros::NodeHandle dynamixel_out, teensy_out;
+	//INIT PUBLISHING FUNCTION
+    	std_msgs::Float32MultiArray* dynamixel_array=new std_msgs::Float32MultiArray[4];
+    	dynamixel_array->data.push_back(11);
+    	dynamixel_array->data.push_back(12);
+    	dynamixel_array->data.push_back(13);
+	dynamixel_array->data.push_back(14);
+    	ros::Publisher dynamixel_pub = dynamixel_out.advertise<std_msgs::Float32MultiArray>("dynamixel_commands", 1);
+	//INIT TEENSY STOP FUNCTION
+	std_msgs::String teensy_end;
+	std::stringstream ss;
+	ss<<"1";
+	teensy_end.data=ss.str();
+	ros::Publisher teensy_pub = teensy_out.advertise<std_msgs::String>("teensy_stop", 1);
+	if(ros::ok()){
+		dynamixel_pub.publish(*dynamixel_array);
+		ros::spinOnce();
+		sleep(1);
+		dynamixel_array->data.clear();
+		dynamixel_array->data.push_back(DYNAMIXEL_INIT_PROCESS);
+        	dynamixel_array->data.push_back(3);
+        	dynamixel_array->data.push_back(4);
+		dynamixel_array->data.push_back(5);
+		dynamixel_pub.publish(*dynamixel_array);
+		ros::spinOnce();
+		sleep(10);
+		ROS_INFO("Moving to operation startup position");
+		dynamixel_array->data.clear();
+		dynamixel_array->data.push_back(DYNAMIXEL_POSITION_CONTROL);
+        	dynamixel_array->data.push_back(PROCEDURE_THETA1);
+        	dynamixel_array->data.push_back(PROCEDURE_THETA2);
+		dynamixel_array->data.push_back(PROCEDURE_THETA3);
+		dynamixel_pub.publish(*dynamixel_array);
+		ros::spinOnce();
+		sleep(10);
+		uint8_t i=0;
+		while(ros::ok() && i<2){
+		i++;
+		sleep(1);
+		ros::spinOnce();
+		}
+		ROS_INFO("Prodecure ended...moving to start");
+		//procedure ended. move out
+		dynamixel_array->data.clear();
+		dynamixel_array->data.push_back(DYNAMIXEL_END_PROCESS);
+        	dynamixel_array->data.push_back(1);
+        	dynamixel_array->data.push_back(2);
+		dynamixel_array->data.push_back(3);
+		dynamixel_pub.publish(*dynamixel_array);
+		teensy_pub.publish(teensy_end);
+		ros::spinOnce();
+	} //close if ros_ok
+	else{
+		ROS_INFO("ros poulo");	
+	}
+	return 0;
+}

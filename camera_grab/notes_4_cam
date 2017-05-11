@@ -1,0 +1,14 @@
+v4l2-ctl -d /dev/video1 --all
+luvcview -d /dev/video1 -L
+
+//commands
+--BASIC
+roslaunch ~/ros_Imaging_tet/src/camera_grab/launch/launch_cam.launch 
+ROS_NAMESPACE=camera rosrun image_proc image_proc
+
+--OTHER
+rosrun image_view image_view image:=camera/image_rect_color (to view rect image)
+
+--ARUCO CALIBRATION
+./aruco_calibration live cam_calib_aruco_large.yml -size 0.0355
+

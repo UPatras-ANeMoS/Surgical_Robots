@@ -1,0 +1,1037 @@
+/*******************************************************************************
+* Copyright (c) 2016, ROBOTIS CO., LTD.
+* All rights reserved.
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+*
+* * Redistributions of source code must retain the above copyright notice, this
+*   list of conditions and the following disclaimer.
+*
+* * Redistributions in binary form must reproduce the above copyright notice,
+*   this list of conditions and the following disclaimer in the documentation
+*   and/or other materials provided with the distribution.
+*
+* * Neither the name of ROBOTIS nor the names of its
+*   contributors may be used to endorse or promote products derived from
+*   this software without specific prior written permission.
+*
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+* AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+* IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+* DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+* FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+* DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+* SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+* CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+* OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+* OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*******************************************************************************/
+
+/*Version 0.3 by Nick Evangeliou*/
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <limits.h>
+
+//DXL STUFF
+#include "dynamixel_sdk/dynamixel_sdk.h"                                 // Uses Dynamixel SDK library
+//#include "dynamixel_sdk/dxl_defs.h"
+#include "dynamixel_sdk/dxl_functions.h"
+uint8_t num_actuators=NUM_ACTUATORS1+NUM_ACTUATORS2;
+dynamixel_motor* dxl_motor=new dynamixel_motor[num_actuators];
+dynamixel::PortHandler      *portHandler1,*portHandler2;
+dynamixel::PacketHandler    *packetHandler1,*packetHandler2;
+bool dxl_addparam_result1,dxl_addparam_result2;
+bool dxl_getdata_result1,dxl_getdata_result2;
+uint8_t dxl_global_error;
+
+//TEENSY SERIAL
+#include "dynamixel_sdk/teensy_serial.h"
+#define SPEED 0
+#define BIN 6
+#define BOUT 1
+#define PORT "/dev/Teensy"
+cserial_board* teensy;
+
+//ROS STUFF
+#include "ros/ros.h"
+#include "std_msgs/Float32MultiArray.h"
+#include "std_msgs/UInt32MultiArray.h"
+#include "std_msgs/Int8MultiArray.h"
+#include "std_msgs/String.h"
+#include <sstream>
+#define RATE 500 //Hz
+
+uint8_t end_program=0;
+
+int getch()
+{
+#ifdef __linux__
+  struct termios oldt, newt;
+  int ch;
+  tcgetattr(STDIN_FILENO, &oldt);
+  newt = oldt;
+  newt.c_lflag &= ~(ICANON | ECHO);
+  tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+  ch = getchar();
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+  return ch;
+#elif defined(_WIN32) || defined(_WIN64)
+  return _getch();
+#endif
+}
+
+
+int kbhit(char* c)
+{
+#ifdef __linux__
+  struct termios oldt, newt;
+  int ch;
+  int oldf;
+
+  tcgetattr(STDIN_FILENO, &oldt);
+  newt = oldt;
+  newt.c_lflag &= ~(ICANON | ECHO);
+  tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+  oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+  fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
+  ch = getchar();
+
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+  fcntl(STDIN_FILENO, F_SETFL, oldf);
+
+  if (ch != EOF)
+  {
+    //ungetc(ch, stdin);
+    *c=ch;
+    return 1;
+  }
+
+  return 0;
+#elif defined(_WIN32) || defined(_WIN64)
+  return _kbhit();
+#endif
+}
+
+bool init_process(){
+    // Initialize PortHandler instance
+    // Set the port path
+    // Get methods and members of PortHandlerLinux or PortHandlerWindows
+    portHandler1=dynamixel::PortHandler::getPortHandler(DEVICENAME1);
+    portHandler2=dynamixel::PortHandler::getPortHandler(DEVICENAME2);
+    // Initialize PacketHandler instance
+    // Set the protocol version
+    // Get methods and members of Protocol1PacketHandler or Protocol2PacketHandler
+    packetHandler1=dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
+    packetHandler2 = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
+    //dxl_addparam_result1=dxl_addparam_result2= false;                // addParam result
+    //dxl_getdata_result1=dxl_getdata_result2= false;
+    //errors
+    //dxl_error1=dxl_error2= 0;                          // Dynamixel error
+    //dxl_comm_result1=dxl_comm_result2= COMM_TX_FAIL;             // Communication result
+
+    //-------------------------------------------------------------------------
+    //START TEENSY----------------------------------------------------------
+    //-------------------------------------------------------------------------
+    //INIT SERIAL PORT
+    char* port=new char[20];
+    strcpy(port,PORT);
+    teensy=new cserial_board(port, SPEED, BIN, BOUT);
+    bool ret2=false;
+    if(teensy->cserial_open()>0){
+       teensy->ch_out[0]='!';
+       teensy->ch_in[0]=teensy->ch_in[1]=1;
+       teensy->ch_in[2]=teensy->ch_in[3]=teensy->ch_in[4]=teensy->ch_in[5]=0;
+       ROS_INFO("Teensy ready");
+       if(teensy->cserial_write()>0){
+           //serial read attempt
+           if (teensy->cserial_read()){
+                ROS_INFO("Teensy first read success");
+                ret2=true;
+           }
+       }
+       if(teensy->cserial_write()>0){
+           //serial read attempt
+           if (teensy->cserial_read()){
+                ROS_INFO("Teensy first read success");
+                ret2=true;
+           }
+       }
+       if(teensy->cserial_write()>0){
+           //serial read attempt
+           if (teensy->cserial_read()){
+                ROS_INFO("Teensy first read success");
+                ret2=true;
+           }
+       }
+    }
+    else{
+        ROS_INFO("Failed to find Teensy");
+    }
+    if(!ret2) return false;
+
+    //-------------------------------------------------------------------------
+    //START USB2RS485----------------------------------------------------------
+    //-------------------------------------------------------------------------
+    // Open port1
+    if (portHandler1->openPort())   ROS_INFO("Succeeded to open the port!");
+    else{
+      ROS_INFO("Failed to open port 1!");
+      return false;
+    }
+    // Open port2
+    if (portHandler2->openPort())   ROS_INFO("Succeeded to open the port!");
+    else{
+      ROS_INFO("Failed to open port 2!");
+      return false;
+    }
+    // Set port1 baudrate
+    if (portHandler1->setBaudRate(BAUDRATE))    ROS_INFO("Succeeded to change the baudrate!");
+    else{
+      ROS_INFO("Failed to change the baudrate of port 1!");
+      return false;
+    }
+    // Set port2 baudrate
+    if (portHandler2->setBaudRate(BAUDRATE))    ROS_INFO("Succeeded to change the baudrate!");
+    else{
+      ROS_INFO("Failed to change the baudrate of port 2!");
+      return false;
+    }
+    //-------------------------------------------------------------------------
+    //SET STARTUP SETTINGS OF DYNAMIXEL----------------------------------------
+    //-------------------------------------------------------------------------
+	//TORQUES ON FOR ALL
+	uint8_t TORQUE_ON1[NUM_ACTUATORS1];
+	uint8_t num_motor[NUM_ACTUATORS1];
+	for (uint8_t i=0;i<NUM_ACTUATORS1;i++){TORQUE_ON1[i]=1; num_motor[i]=i;}
+	if(torqueONOFF_sync(TORQUE_ON1,num_motor, NUM_ACTUATORS1,portHandler1,packetHandler1, dxl_motor)){
+		//ROS_INFO("Torque DXL controller 1 OK");
+		for(uint8_t i=0;i<NUM_ACTUATORS1;i++) dxl_motor[i].health=1;
+	}
+	else{ROS_INFO("Problem with TorqueON"); return false;}
+	uint8_t TORQUE_ON2[NUM_ACTUATORS2];
+	uint8_t num_motor2[NUM_ACTUATORS2];
+	for (uint8_t i=0;i<NUM_ACTUATORS2;i++){TORQUE_ON2[i]=1; num_motor2[i]=NUM_ACTUATORS1+i;}
+	if(torqueONOFF_sync(TORQUE_ON2,num_motor2, NUM_ACTUATORS2,portHandler2,packetHandler2, dxl_motor)){
+		//ROS_INFO("Torque DXL controller 2 OK");
+		for(uint8_t i=0;i<NUM_ACTUATORS2;i++) dxl_motor[NUM_ACTUATORS1+i].health=1;
+	}
+	else{ROS_INFO("Problem with TorqueON"); return false;}
+	sleep(1);
+	//SYNC WRITE POSITION CONTROL FOR ALL
+	if(set_position_control_sync(num_motor, NUM_ACTUATORS1,portHandler1,packetHandler1, dxl_motor)){
+		//ROS_INFO("Position control synchronous for DXL controller 1 OK");
+		for(uint8_t i=0;i<NUM_ACTUATORS1;i++) dxl_motor[i].mode=POSITION_CONTROL;
+	}
+	else{ROS_INFO("Problem with position control synchronous for DXL controller 1"); return false;}
+	if(set_position_control_sync(num_motor2, NUM_ACTUATORS2,portHandler2,packetHandler2, dxl_motor)){
+		//ROS_INFO("Position control synchronous for DXL controller 2 OK");
+		for(uint8_t i=0;i<NUM_ACTUATORS2;i++) dxl_motor[i].mode=POSITION_CONTROL;
+	}
+	else{ROS_INFO("Problem with position control synchronous for DXL controller 2"); return false;}
+	sleep(1);
+    //SYNC WRITE PID FOR ALL
+	//P
+	uint32_t p_values[NUM_ACTUATORS1];
+	for(uint8_t i=0;i<NUM_ACTUATORS1;i++) p_values[i]=dxl_motor[i].P;
+	uint32_t p_values2[NUM_ACTUATORS2];
+	for(uint8_t i=0;i<NUM_ACTUATORS2;i++) p_values2[i]=dxl_motor[i+NUM_ACTUATORS1].P;
+	if(SYNC_WRITE(num_motor, NUM_ACTUATORS1, P_P, 1, p_values, portHandler1, packetHandler1, dxl_motor)){
+		//ROS_INFO("P synchronous for DXL controller 1 OK");
+	}
+	else{ROS_INFO("P synchronous for DXL controller 1 ERROR"); return false;}
+	if(SYNC_WRITE(num_motor2, NUM_ACTUATORS2, P_P, 1, p_values2, portHandler2, packetHandler2, dxl_motor)){
+		//ROS_INFO("P synchronous for DXL controller 2 OK");
+	}
+	else{ROS_INFO("P synchronous for DXL controller 2 ERROR"); return false;}
+	sleep(1);
+	//I
+	uint32_t i_values[NUM_ACTUATORS1];
+	for(uint8_t i=0;i<NUM_ACTUATORS1;i++) i_values[i]=dxl_motor[i].I;
+	uint32_t i_values2[NUM_ACTUATORS2];
+	for(uint8_t i=0;i<NUM_ACTUATORS2;i++) i_values2[i]=dxl_motor[i+NUM_ACTUATORS1].I;
+	if(SYNC_WRITE(num_motor, NUM_ACTUATORS1, P_I, 1, i_values, portHandler1, packetHandler1, dxl_motor)){
+		//ROS_INFO("I synchronous for DXL controller 1 OK");
+	}
+	else{ROS_INFO("I synchronous for DXL controller 1 ERROR"); return false;}
+	if(SYNC_WRITE(num_motor2, NUM_ACTUATORS2, P_I, 1, i_values2, portHandler2, packetHandler2, dxl_motor)){
+		//ROS_INFO("I synchronous for DXL controller 2 OK");
+	}
+	else{ROS_INFO("I synchronous for DXL controller 2 ERROR"); return false;}
+	sleep(1);
+	//D
+	uint32_t d_values[NUM_ACTUATORS1];
+	for(uint8_t i=0;i<NUM_ACTUATORS1;i++) d_values[i]=dxl_motor[i].D;
+	uint32_t d_values2[NUM_ACTUATORS2];
+	for(uint8_t i=0;i<NUM_ACTUATORS2;i++) d_values2[i]=dxl_motor[i+NUM_ACTUATORS1].D;
+	if(SYNC_WRITE(num_motor, NUM_ACTUATORS1, P_D, 1, d_values, portHandler1, packetHandler1, dxl_motor)){
+		//ROS_INFO("D synchronous for DXL controller 1 OK");
+	}
+	else{ROS_INFO("D synchronous for DXL controller 1 ERROR"); return false;}
+	if(SYNC_WRITE(num_motor2, NUM_ACTUATORS2, P_D, 1, d_values2, portHandler2, packetHandler2, dxl_motor)){
+		//ROS_INFO("D synchronous for DXL controller 2 OK");
+	}
+	else{ROS_INFO("D synchronous for DXL controller 2 ERROR"); return false;}
+	sleep(1);
+	//SYNC WRITE ACCELERATION FOR ALL
+	uint32_t accel[NUM_ACTUATORS1];
+	for(uint8_t i=0;i<NUM_ACTUATORS1;i++) accel[i]=dxl_motor[i].acceleration;
+	uint32_t accel2[NUM_ACTUATORS2];
+	for(uint8_t i=0;i<NUM_ACTUATORS2;i++) accel2[i]=dxl_motor[i+NUM_ACTUATORS1].acceleration;
+	if(SYNC_WRITE(num_motor, NUM_ACTUATORS1, P_ACCELERATION, 1, accel, portHandler1, packetHandler1, dxl_motor)){
+		//ROS_INFO("Acceleration synchronous for DXL controller 1 OK");
+	}
+	else{ROS_INFO("Acceleration for DXL controller 1 ERROR"); return false;}
+	if(SYNC_WRITE(num_motor2, NUM_ACTUATORS2, P_ACCELERATION, 1, accel2, portHandler2, packetHandler2, dxl_motor)){
+		//ROS_INFO("Acceleration for DXL controller 2 OK");
+	}
+	else{ROS_INFO("Acceleration for DXL controller 2 ERROR"); return false;}
+	sleep(1);
+	//SYNC WRITE VELOCITY ONLY FOR MOTORS 2,3
+	uint8_t num_motor_special[2]={2,3};
+	for(uint8_t i=0;i<NUM_ACTUATORS2-1;i++) dxl_motor[i+NUM_ACTUATORS1].speed=10;
+	if(write_velocity_sync(num_motor_special, NUM_ACTUATORS2-1, portHandler2, packetHandler2, dxl_motor)){
+		//ROS_INFO("Acceleration for DXL controller 2 OK");
+	}
+	else{ROS_INFO("Speed limit for DXL controller 2 ERROR"); return false;}
+	sleep(1);
+	//ALL TORUQES TO 256
+	uint16_t torque=512;
+	uint8_t err=0;
+	write_uint16t(packetHandler1, portHandler1,1,P_TORQUE_L,torque,&err);
+	usleep(1000);
+	write_uint16t(packetHandler1, portHandler1,2,P_TORQUE_L,torque,&err);
+	usleep(1000);
+	torque=256;
+	write_uint16t(packetHandler2, portHandler2,1,P_TORQUE_L,torque,&err);
+	usleep(1000);
+	write_uint16t(packetHandler2, portHandler2,2,P_TORQUE_L,torque,&err);
+	usleep(1000);
+	torque=512;
+	write_uint16t(packetHandler2, portHandler2,3,P_TORQUE_L,torque,&err);
+	usleep(1000);
+	return true;
+}
+
+bool startup_position(){	 //SET ALL DXL_MOTORS TO THEIR STARTUP POSITION
+	//check that Teensy is still online
+	//START MOTION 5 first!
+    bool ret=false;
+    //read teensy vals
+    if(!teensy->cserial_update()){ROS_INFO("Teensy error read/write!"); return false;}
+    //START BY SETTING VELOCITY CONTROL MODE TO RESPECTIVE MOTORS AKA 1,2 AND 5
+    //1+2
+	int health=0;
+	for(uint8_t i=0;i<NUM_ACTUATORS1;i++)	health+=dxl_motor[i].health;
+	if(health==NUM_ACTUATORS1){
+		uint8_t num_motor[NUM_ACTUATORS1];
+		for (uint8_t i=0;i<NUM_ACTUATORS1;i++)	num_motor[i]=i;
+		if(set_velocity_control_sync(num_motor, NUM_ACTUATORS1, portHandler1, packetHandler1, dxl_motor)){
+			for(uint8_t i=0;i<NUM_ACTUATORS1;i++) dxl_motor[i].mode=VELOCITY_CONTROL;
+		}
+		else{
+		ROS_INFO("Sync velocity control mode for motors 1 and 2 not ok"); 
+		for(uint8_t i=0;i<NUM_ACTUATORS1;i++)	dxl_motor[i].health=0;	
+		}
+	}
+	else{ROS_INFO("DXL 1 && 2 --> No health no work..."); return false;}
+
+    //5
+	if(dxl_motor[4].health){
+  		if(set_velocity_control_single(4, portHandler2, packetHandler2,	dxl_motor)){ dxl_motor[4].mode=VELOCITY_CONTROL;
+		}
+		else{
+			ROS_INFO("Velocity control mode for motor 4 not ok"); 
+			dxl_motor[4].health=0;	
+		}
+	}
+	else{ROS_INFO("DXL 5 --> No health no work..."); return false;}
+	
+	//check if 5 must move then move if necessary
+    if(teensy->ch_in[1]==49 && dxl_motor[4].mode==VELOCITY_CONTROL){
+		dxl_motor[4].speed=80;
+		if(!write_velocity_single(4 , portHandler2, packetHandler2,	dxl_motor)){
+			dxl_motor[4].speed=0;
+			dxl_motor[4].health=0;
+			ROS_INFO("Problem writing target velocity for DXL 5");
+			return false;
+		}
+		else{ //start monitoring motion
+			dxl_motor[4].moving=1;
+			while(dxl_motor[4].moving>0 && teensy->cserial_update() && teensy->ch_in[1]==49){
+			read_uint8t(packetHandler2,portHandler2, dxl_motor[4].ID, P_MOVING , &dxl_motor[4].moving, &dxl_global_error);
+			//ROS_INFO("%d, %d",dxl_motor[4].moving,teensy->ch_in[1]);
+			}
+			dxl_motor[4].speed=0;
+			while(!write_velocity_single(4, portHandler2, packetHandler2,	dxl_motor)){
+			dxl_motor[4].current_velocity;
+			dxl_motor[4].health=0;
+			read_position_single(4,portHandler2,packetHandler2,dxl_motor);
+			ROS_INFO("Problem writing target velocity for DXL 5 to stop moving");
+			return false;
+			}
+			dxl_motor[4].moving=0;	
+			dxl_motor[4].current_velocity=dxl_motor[4].speed;
+		}
+	}
+	else{ROS_INFO("DXL 5 startup position init stopped. Perhaps already in start position?");}
+	sleep(2);	
+	while(!read_position_single(4,portHandler2,packetHandler2,dxl_motor)){ROS_INFO("Error read pos DXL 5");sleep(0.5);}	
+	dxl_motor[4].position=dxl_motor[4].position_start=dxl_motor[4].current_position;
+
+	//ROS_INFO("Error reading position of dxl 4");
+	//return false;
+	//3+4
+	if(dxl_motor[2].health && dxl_motor[3].health){
+		if(dxl_motor[2].mode!=POSITION_CONTROL){
+			if(set_position_control_single(2, portHandler2, packetHandler2,	dxl_motor))
+				dxl_motor[2].mode=POSITION_CONTROL;
+			else	{ROS_INFO("Problem setting position control to motor 2"); dxl_motor[2].health=0;}
+		}
+		if(dxl_motor[3].mode!=POSITION_CONTROL){
+			if(set_position_control_single(3, portHandler2, packetHandler2,	dxl_motor))
+				dxl_motor[3].mode=POSITION_CONTROL;
+			else	{ROS_INFO("Problem setting position control to motor 3"); dxl_motor[3].health=0;}
+		}
+		if(dxl_motor[2].mode==POSITION_CONTROL && dxl_motor[3].mode==POSITION_CONTROL){
+			dxl_motor[2].position=DOF3_START_POS;
+			dxl_motor[3].position=DOF4_START_POS-DOF4_OFFSET;
+			uint8_t num_motor[2]={2,3};
+			uint8_t sum=2;
+			if(write_position_sync(num_motor,sum,portHandler2,packetHandler2,dxl_motor)){
+				dxl_motor[2].moving=dxl_motor[3].moving=1;
+				do{
+					while(!read_position_bulk(num_motor,2,portHandler2,packetHandler2,dxl_motor)){sleep(0.1);}
+					}while((abs(dxl_motor[2].position-dxl_motor[2].current_position))>ROT_DOF_TOLERANCE || (abs(dxl_motor[3].position-dxl_motor[3].current_position))>ROT_DOF_TOLERANCE);	
+				dxl_motor[2].moving=dxl_motor[3].moving=0;
+			}
+			else{ROS_INFO("Error sync write position to DXL 2,3"); return false;}
+		}
+		sleep(0.5);
+		//Get final position
+		uint8_t num_motor[2]={2,3};
+		while(!read_position_bulk(num_motor,2,portHandler2,packetHandler2,dxl_motor)){ROS_INFO("Bulk pos control read error for DXL 2,3"); sleep(0.5);}
+		dxl_motor[2].position=dxl_motor[2].position_start=dxl_motor[2].current_position;
+		dxl_motor[3].position=dxl_motor[3].position_start=dxl_motor[3].current_position;
+	}
+	else{ROS_INFO("Dynamixel 2 , 3 --> No health no party!"); return false;}
+
+    //1+2
+    //veolocity control is already set so moving on to motion...
+	if(dxl_motor[0].health==1 && dxl_motor[1].health==1){
+		uint8_t num_motor2[2]={0,1};
+		if(teensy->ch_in[3]==49 || teensy->ch_in[4]==49){//someone must move...
+		    if(teensy->ch_in[3]!=48)	dxl_motor[0].speed=150; //dxl 0 already on lim switch
+			else dxl_motor[0].speed=0;
+		    if(teensy->ch_in[4]!=48)	dxl_motor[1].speed=150; //dxl 1 already on lim switch
+			else	dxl_motor[1].speed=0;
+			while(!write_velocity_sync(num_motor2,2, portHandler1,packetHandler1,dxl_motor)){
+						ROS_INFO("error writing synchronous velocity to DXL 0,1");
+			}
+			if(dxl_motor[0].speed!=0) dxl_motor[0].moving=1;
+			if(dxl_motor[1].speed!=0) dxl_motor[1].moving=1;
+			while(teensy->cserial_update() && (dxl_motor[0].moving+dxl_motor[1].moving)>0 && 
+dxl_motor[0].health!=0 && dxl_motor[1].health!=0){
+				if(teensy->ch_in[3]==48 &&	dxl_motor[0].moving==1){ //Motor 1 on limit switch
+					dxl_motor[0].speed=0;
+					while(!write_velocity_single(0,portHandler1,packetHandler1,dxl_motor)){ROS_INFO("error writing velocity 0 to dxl 0"); dxl_motor[0].health=0;}
+					dxl_motor[0].moving=0; dxl_motor[0].current_velocity=dxl_motor[0].speed;
+				}
+				if(teensy->ch_in[4]==48 &&	dxl_motor[1].moving==1){ //Motor 2 on limit switch
+					dxl_motor[1].speed=0;
+					while(!write_velocity_single(1,portHandler1,packetHandler1,dxl_motor)){ROS_INFO("error writing velocity 0 to dxl 1"); dxl_motor[1].health=0;}
+					dxl_motor[1].moving=0; dxl_motor[1].current_velocity=dxl_motor[1].speed;
+				}
+			}
+			//if teensy problem consider switching off
+			if(!teensy->cserial_update() || dxl_motor[0].health==0 || dxl_motor[1].health==0) return false;
+		}
+		else{ROS_INFO("%d %d %d %d",teensy->ch_in[2],teensy->ch_in[3],teensy->ch_in[4],teensy->ch_in[5]);}
+		sleep(0.5);
+		//when all this is over measure positions
+		/*
+		while(!read_position_bulk(num_motor2,NUM_ACTUATORS1,portHandler1,packetHandler1,dxl_motor)){
+						ROS_INFO("Bulk pos read error for DXL 0,1");
+						sleep(0.5);
+		}
+		*/
+		while(!read_position_single(0,portHandler1,packetHandler1,dxl_motor)){ROS_INFO("Error read DXL 0");}
+		dxl_motor[0].position=dxl_motor[0].position_start=dxl_motor[0].current_position;
+		while(!read_position_single(1,portHandler1,packetHandler1,dxl_motor)){ROS_INFO("Error read DXL 1");}
+		dxl_motor[1].position=dxl_motor[1].position_start=dxl_motor[1].current_position;
+	}
+	else{ROS_INFO("Dynamixel 0 , 1 --> No heatlh no party"); return false;}
+
+    return true;
+}
+
+bool end_process(){
+    if(DISABLE_TORQUE){
+	//TORQUES OFF FOR ALL
+	uint8_t TORQUE_ON1[NUM_ACTUATORS1];
+	uint8_t num_motor[NUM_ACTUATORS1];
+	for (uint8_t i=0;i<NUM_ACTUATORS1;i++){TORQUE_ON1[i]=0; num_motor[i]=i;}
+	if(torqueONOFF_sync(TORQUE_ON1,num_motor, NUM_ACTUATORS1,portHandler1,packetHandler1, dxl_motor)){
+		ROS_INFO("Torque DXL controller 1 Off");
+		for(uint8_t i=0;i<NUM_ACTUATORS1;i++) dxl_motor[i].health=0;
+	}
+	else{ROS_INFO("Problem SETTING TorqueOFF. cLOSE POWER!!!"); return false;}
+	uint8_t TORQUE_ON2[NUM_ACTUATORS2];
+	uint8_t num_motor2[NUM_ACTUATORS2];
+	for (uint8_t i=0;i<NUM_ACTUATORS2;i++){TORQUE_ON2[i]=0; num_motor2[i]=NUM_ACTUATORS1+i;}
+	if(torqueONOFF_sync(TORQUE_ON2,num_motor2, NUM_ACTUATORS2,portHandler2,packetHandler2, dxl_motor)){
+		ROS_INFO("Torque DXL controller 2 Off");
+		for(uint8_t i=0;i<NUM_ACTUATORS1;i++) dxl_motor[i].health=0;
+	}
+	else{ROS_INFO("Problem SETTING TorqueOFF. cLOSE POWER!!!"); return false;}
+
+	//SWITCH TO VELOCITY CONTROL AND HALT?
+	
+    }
+    // Close port1
+    portHandler1->closePort();
+    // Close port2
+    portHandler2->closePort();
+    // Close Teensy
+    teensy->~cserial_board();
+}
+
+void chatterCallback(const std_msgs::UInt32MultiArray::ConstPtr& dxl_in){
+    switch((int) dxl_in->data[0]){
+        case DYNAMIXEL_INIT_PROCESS:{
+                init_process();
+            break;
+        }
+        case DYNAMIXEL_START_POS_PROCESS:{
+                startup_position();
+            break;
+        }
+        case DYNAMIXEL_GO_TO_POS:{ //go to a desired position in a certain period of time
+
+            break;
+        }
+		case DYNAMIXEL_GO_TO_POS_NOTIME:{
+			for(uint8_t i=1;i<dxl_in->data.size();i++)
+			ROS_INFO("%d",dxl_in->data[i]);
+			//check that all dynamixels have velocity control
+			for(uint8_t i=0;i<num_actuators;i++){
+				if(dxl_motor[i].mode!=VELOCITY_CONTROL){
+				ROS_INFO("Motor %d not in velocity mode",dxl_motor[i].ID);				
+								
+				}			
+			}
+			break;
+				
+		}
+		case DYNAMIXEL_GO_TO_PROCEDURE_START:{
+			ROS_INFO("[COMMAND]:	GO_TO_PROCEDURE_START");
+			//-------------------------------------------------------------------------------
+			//check motors are in position control for 2,3 and velocity for 1,2,5
+			//3			
+			if(dxl_motor[2].mode!=POSITION_CONTROL){
+				while(!set_position_control_single(2,portHandler2,packetHandler2,dxl_motor)){}
+				dxl_motor[2].mode=POSITION_CONTROL;
+				while(!read_position_single(2,portHandler2,packetHandler2,dxl_motor)){}
+			}
+			//4
+			if(dxl_motor[3].mode!=POSITION_CONTROL){
+				while(!set_position_control_single(3,portHandler2,packetHandler2,dxl_motor)){}
+				dxl_motor[3].mode=POSITION_CONTROL;
+				while(!read_position_single(3,portHandler2,packetHandler2,dxl_motor)){}
+			}
+			//5
+			if(dxl_motor[4].mode!=VELOCITY_CONTROL){
+				while(!set_velocity_control_single(4,portHandler2,packetHandler2,dxl_motor)){}
+				dxl_motor[4].mode=VELOCITY_CONTROL;
+				while(!read_position_single(4,portHandler2,packetHandler2,dxl_motor)){}
+			}
+			//1
+			if(dxl_motor[0].mode!=VELOCITY_CONTROL){
+				while(!set_velocity_control_single(0,portHandler2,packetHandler2,dxl_motor)){}
+				dxl_motor[0].mode=VELOCITY_CONTROL;
+				while(!read_position_single(0,portHandler2,packetHandler2,dxl_motor)){}
+			}
+			//2
+			if(dxl_motor[1].mode!=VELOCITY_CONTROL){
+				while(!set_velocity_control_single(1,portHandler2,packetHandler2,dxl_motor)){}
+				dxl_motor[1].mode=VELOCITY_CONTROL;
+				while(!read_position_single(1,portHandler2,packetHandler2,dxl_motor)){}
+			}
+			//--------------------------------------------------------------------------------------
+
+
+			//Check feasibility of positions? --For now done by controller
+			for(uint8_t i=0;i<num_actuators;i++){  
+				ROS_INFO("%d %d %d",dxl_in->data[i+1], dxl_motor[i].position,dxl_motor[i].position_start);			
+			}
+			//----------------------------------------------------------------------------------
+			//3+4 first
+			dxl_motor[2].position=dxl_in->data[3]-DOF3_OFFSET;
+			while(!write_position_single(2,portHandler2,packetHandler2,dxl_motor)){ROS_INFO("Error setting pos for DXL 3");}			
+			dxl_motor[3].position=dxl_in->data[4]-DOF4_OFFSET;
+			while(!write_position_single(3,portHandler2,packetHandler2,dxl_motor)){ROS_INFO("Error setting pos for DXL 4");}
+						
+			//1
+			double temp_pos0=dxl_motor[0].position;
+			dxl_motor[0].position=roundf(dxl_in->data[1]/RESOLUTION_DIVIDER+0.5)+dxl_motor[0].position_start;
+			ROS_INFO("DXL 1 motion facts: %f %d",temp_pos0,dxl_motor[0].position);
+			if(double (dxl_motor[0].position)<temp_pos0) dxl_motor[0].speed=150;
+			else if(double (dxl_motor[0].position)>temp_pos0) dxl_motor[0].speed=1024+150;
+			else	dxl_motor[0].speed=0;
+			if(dxl_motor[0].speed!=0 && write_velocity_single(0,portHandler1,packetHandler1,dxl_motor)){
+				dxl_motor[0].moving=1;
+				while(!read_position_single(0,portHandler1,packetHandler1,dxl_motor)){}
+				uint16_t previous_pos0=dxl_motor[0].current_position;
+				while(dxl_motor[0].moving!=0 && teensy->cserial_update()){
+					if((teensy->ch_in[2]==48 && dxl_motor[0].speed>1024) || (teensy->ch_in[3]==48 && dxl_motor[0].speed<1024)){
+						dxl_motor[0].speed/=1024; 
+						while(!write_velocity_single(0 , portHandler1, packetHandler1,	dxl_motor)){} 
+						dxl_motor[0].moving=0;						
+					}
+					else{
+						while(!read_position_single(0,portHandler1,packetHandler1,dxl_motor)){}
+						if(abs(dxl_motor[0].current_position-previous_pos0)>4000)	temp_pos0+=4096.0/RESOLUTION_DIVIDER;
+						if(dxl_motor[0].speed>=1024){//CCW
+							temp_pos0+=(double (previous_pos0-dxl_motor[0].current_position))/RESOLUTION_DIVIDER;
+						}
+						else{//CW
+							temp_pos0+=(double (dxl_motor[0].current_position-previous_pos0))/RESOLUTION_DIVIDER;				
+						}
+						previous_pos0=dxl_motor[0].current_position;
+						ROS_INFO("[TEMP_POS]: \t %f",temp_pos0);
+						if((dxl_motor[0].speed>1024 && temp_pos0>= double(dxl_motor[0].position)) || (dxl_motor[0].speed<1024 && temp_pos0<= double(dxl_motor[0].position))){
+							dxl_motor[0].speed/=1024; 
+							while(!write_velocity_single(0 , portHandler1, packetHandler1,	dxl_motor)){} 
+							dxl_motor[0].moving=0;	
+						}
+					}
+				}
+				if(dxl_motor[0].moving!=0){//in case Teensy goes off
+					dxl_motor[0].speed/=1024;
+					while(!write_velocity_single(0 , portHandler1, packetHandler1,	dxl_motor)){}
+					dxl_motor[0].moving=0;
+				}
+			}
+			dxl_motor[0].position=roundf(dxl_in->data[1]/RESOLUTION_DIVIDER+0.5)+dxl_motor[0].position_start;
+			//2
+			temp_pos0=dxl_motor[1].position;
+			dxl_motor[1].position=roundf(dxl_in->data[2]/RESOLUTION_DIVIDER+0.5)+dxl_motor[1].position_start;
+			ROS_INFO("DXL 1 motion facts: %f %d",temp_pos0,dxl_motor[1].position);
+			if(double (dxl_motor[1].position)<temp_pos0) dxl_motor[1].speed=150;
+			else if(double (dxl_motor[1].position)>temp_pos0) dxl_motor[1].speed=1024+150;
+			else	dxl_motor[1].speed=0;
+			if(dxl_motor[1].speed!=0 && write_velocity_single(1,portHandler1,packetHandler1,dxl_motor)){
+				dxl_motor[1].moving=1;
+				while(!read_position_single(1,portHandler1,packetHandler1,dxl_motor)){}
+				uint16_t previous_pos0=dxl_motor[1].current_position;
+				while(dxl_motor[1].moving!=0 && teensy->cserial_update()){
+					if((teensy->ch_in[5]==48 && dxl_motor[1].speed>1024) || (teensy->ch_in[4]==48 && dxl_motor[1].speed<1024)){
+						dxl_motor[1].speed/=1024; 
+						while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){} 
+						dxl_motor[1].moving=0;						
+					}
+					else{
+						while(!read_position_single(1,portHandler1,packetHandler1,dxl_motor)){}
+						if(abs(dxl_motor[1].current_position-previous_pos0)>4000)	temp_pos0+=4096.0/RESOLUTION_DIVIDER;
+						if(dxl_motor[1].speed>=1024){//CCW
+							temp_pos0+=(double (previous_pos0-dxl_motor[1].current_position))/RESOLUTION_DIVIDER;
+						}
+						else{//CW
+							temp_pos0+=(double (dxl_motor[1].current_position-previous_pos0))/RESOLUTION_DIVIDER;				
+						}
+						previous_pos0=dxl_motor[1].current_position;
+						ROS_INFO("[TEMP_POS]: \t %f",temp_pos0);
+						if((dxl_motor[1].speed>1024 && temp_pos0>= double(dxl_motor[1].position)) || (dxl_motor[1].speed<1024 && temp_pos0<= double(dxl_motor[1].position))){
+							dxl_motor[1].speed/=1024; 
+							while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){} 
+							dxl_motor[1].moving=0;	
+						}
+					}
+				}
+				if(dxl_motor[1].moving!=0){//in case Teensy goes off
+					dxl_motor[1].speed/=1024;
+					while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){}
+					dxl_motor[1].moving=0;
+				}
+			}
+			/*
+			//2
+			temp_pos0=dxl_motor[1].position;
+			dxl_motor[1].position=(uint16_t) (roundf(dxl_in->data[2]/RESOLUTION_DIVIDER+0.5)+dxl_motor[1].position_start);
+			ROS_INFO("DXL 2 motion facts: %f %d",temp_pos0,dxl_motor[1].position);
+			sleep(5);
+			if(dxl_motor[1].position*1.0<temp_pos0) dxl_motor[1].speed=150;
+			else if(dxl_motor[1].position*1.0>temp_pos0) dxl_motor[1].speed=1024+150;
+			else	dxl_motor[1].speed=0;
+			if(dxl_motor[1].speed!=0 && write_velocity_single(1,portHandler1,packetHandler1,dxl_motor)){
+				//ROS_INFO("Wrote speed!");
+				 //start monitoring motion
+				dxl_motor[1].moving=1;
+				double previous_pos0=temp_pos0;
+				switch(dxl_motor[1].speed<1024){
+				case true:{
+						//ROS_INFO("Case true");
+						while(dxl_motor[1].moving>0 && teensy->cserial_update() && teensy->ch_in[4]!=48){
+							//compute new potition
+							while(!read_position_single(1,portHandler1,packetHandler1,dxl_motor)){}
+							usleep(1000);
+							if((dxl_motor[1].current_position*1.0-previous_pos0)>4000){temp_pos0+=(4096.0-dxl_motor[1].current_position*1.0+previous_pos0)/RESOLUTION_DIVIDER; previous_pos0=dxl_motor[1].current_position*1.0;}
+							else if(1.0*dxl_motor[1].current_position<previous_pos0){temp_pos0+=(previous_pos0-1.0*dxl_motor[1].current_position)/RESOLUTION_DIVIDER; previous_pos0=dxl_motor[1].current_position*1.0; ROS_INFO("%f %d",temp_pos0,dxl_motor[1].position);ROS_INFO("%f %d",temp_pos0,dxl_motor[1].position);}
+							//decide if must stop
+							if(temp_pos0<=dxl_motor[1].position*1.0){
+								ROS_INFO("%f %d",temp_pos0,dxl_motor[1].position);
+								dxl_motor[1].speed=1024;
+								while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){}
+								dxl_motor[1].moving=0;
+							}
+							else if((temp_pos0-dxl_motor[1].position*1.0)<300 && dxl_motor[1].speed!=1024+20){
+								dxl_motor[1].speed=1024+20;
+								while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){}
+							}
+						}
+						if(dxl_motor[1].moving!=0){
+								dxl_motor[1].speed=1024;
+								while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){}
+								dxl_motor[1].moving=0;
+						}
+						break;
+				}
+				default:{
+						while(dxl_motor[1].moving>0 && teensy->cserial_update() && teensy->ch_in[5]!=48){
+							//compute new potition
+							while(!read_position_single(1,portHandler1,packetHandler1,dxl_motor)){}
+							usleep(1000);
+							if((previous_pos0-dxl_motor[1].current_position)>4000){temp_pos0+=(4096+dxl_motor[1].current_position-previous_pos0)/RESOLUTION_DIVIDER;previous_pos0=dxl_motor[1].current_position;}
+							else if(dxl_motor[1].current_position>previous_pos0){temp_pos0+=(dxl_motor[1].current_position-previous_pos0)/RESOLUTION_DIVIDER; previous_pos0=dxl_motor[1].current_position;ROS_INFO("%f %d",temp_pos0,dxl_motor[1].position);}
+							//decide if must stop
+							if(temp_pos0>=dxl_motor[1].position){
+								dxl_motor[1].speed=0;
+								while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){}
+								dxl_motor[1].moving=0;
+							}
+							else if(dxl_motor[1].position-temp_pos0<300 && dxl_motor[1].speed!=20){
+								//ROS_INFO("%f %d",temp_pos0,dxl_motor[0].position);
+								dxl_motor[1].speed=20;
+								while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){}
+							}
+						}
+						if(dxl_motor[1].moving!=0){
+								dxl_motor[1].speed=0;
+								while(!write_velocity_single(1 , portHandler1, packetHandler1,	dxl_motor)){}
+								dxl_motor[1].moving=0;
+						}
+						break;
+						}
+				}
+			}
+			//5
+			uint16_t temp_pos=dxl_motor[4].position;
+			dxl_motor[4].position=dxl_in->data[5]+dxl_motor[4].position_start;
+			ROS_INFO("%d %d",temp_pos,dxl_motor[4].position);
+			if(dxl_motor[4].position<dxl_motor[4].current_position) dxl_motor[4].speed=80;
+			else if(dxl_motor[4].position>dxl_motor[4].current_position) dxl_motor[4].speed=1024+80;
+			else	dxl_motor[4].speed=0;
+			if(dxl_motor[4].speed!=0 && write_velocity_single(4,portHandler2,packetHandler2,dxl_motor)){
+				 //start monitoring motion
+				dxl_motor[4].moving=1;
+				uint16_t previous_pos=temp_pos;
+				switch(dxl_motor[4].speed>1024){
+				case true:{
+						while(dxl_motor[4].moving>0 && teensy->cserial_update() && teensy->ch_in[0]!=48){
+							//compute new potition
+							while(!read_position_single(4,portHandler2,packetHandler2,dxl_motor)){}
+							usleep(1000);
+							if((dxl_motor[4].current_position-previous_pos)>4000){	temp_pos+=4096-dxl_motor[4].current_position+previous_pos; previous_pos=dxl_motor[4].current_position; }
+							else if(previous_pos>dxl_motor[4].current_position){	temp_pos+=previous_pos-dxl_motor[4].current_position; previous_pos=dxl_motor[4].current_position; ROS_INFO("Case 1 %d %d %d",temp_pos,previous_pos,dxl_motor[4].current_position);}
+							//decide if must stop
+							if(temp_pos>=dxl_motor[4].position){
+								//ROS_INFO("%d %d",temp_pos,dxl_motor[4].position);
+								dxl_motor[4].speed=1024;
+								while(!write_velocity_single(4 , portHandler2, packetHandler2,	dxl_motor)){}
+								dxl_motor[4].moving=0;
+							}
+							else if((dxl_motor[4].position-temp_pos)<300 && dxl_motor[4].speed!=1024+10){
+								//ROS_INFO("%d %d",temp_pos,dxl_motor[4].position);
+								dxl_motor[4].speed=1024+10;
+								while(!write_velocity_single(4 , portHandler2, packetHandler2,	dxl_motor)){}
+							}
+						}
+						if(dxl_motor[4].moving!=0){
+								dxl_motor[4].speed=1024;
+								while(!write_velocity_single(4 , portHandler2, packetHandler2,	dxl_motor)){}
+								dxl_motor[4].moving=0;
+						}
+						break;
+				}
+				default:{
+						while(dxl_motor[4].moving>0 && teensy->cserial_update() && teensy->ch_in[1]!=48){
+							//compute new potition
+							while(!read_position_single(4,portHandler2,packetHandler2,dxl_motor)){}
+							usleep(1000);
+							if((previous_pos-dxl_motor[4].current_position)>4000){	temp_pos+=4096+dxl_motor[4].current_position-previous_pos;previous_pos=dxl_motor[4].current_position;}
+							else if(previous_pos<dxl_motor[4].current_position){temp_pos+=dxl_motor[4].current_position-previous_pos; previous_pos=dxl_motor[4].current_position;}
+							//decide if must stop
+							if(temp_pos<=dxl_motor[4].position){
+								dxl_motor[4].speed=0;
+								while(!write_velocity_single(4 , portHandler2, packetHandler2,	dxl_motor)){}
+								dxl_motor[4].moving=0;
+							}
+							else if(temp_pos-dxl_motor[4].position<300 && dxl_motor[4].speed!=10){
+								ROS_INFO("%d %d",temp_pos,dxl_motor[4].position);
+								dxl_motor[4].speed=10;
+								while(!write_velocity_single(4 , portHandler2, packetHandler2,	dxl_motor)){}
+							}
+						}
+						if(dxl_motor[4].moving!=0){
+								dxl_motor[4].speed=0;
+								while(!write_velocity_single(4 , portHandler2, packetHandler2,	dxl_motor)){}
+								dxl_motor[4].moving=0;
+						}
+						break;
+						}
+				}
+			}
+			*/
+		break;
+		}
+		case DYNAMIXEL_COMPUTE_LIMITS:{
+			uint32_t lims[3]={0,0,0};
+			//1
+			double temp_pos=0;
+			uint16_t previous_pos=0;
+			if(teensy->cserial_update()){
+				dxl_motor[0].moving=1;
+				if(teensy->ch_in[2]!=48)	dxl_motor[0].speed=1024+300;
+				else if(teensy->ch_in[3]!=48) dxl_motor[0].speed=300;
+				else {ROS_INFO("lim_switch error"); dxl_motor[0].moving=0;}
+				if(dxl_motor[0].moving!=0 && write_velocity_single(0,portHandler1,packetHandler1,dxl_motor)){
+					while(dxl_motor[0].moving!=0 && teensy->cserial_update()){
+						switch(dxl_motor[0].speed>1024){
+							case true:{
+								if(teensy->ch_in[2]==48){
+									dxl_motor[0].speed=1024;
+									write_velocity_single(0,portHandler1,packetHandler1,dxl_motor);
+									sleep(0.2); //wait to stop
+									while(!read_position_single(0,portHandler1,packetHandler1,dxl_motor)){} 										
+									previous_pos=dxl_motor[0].current_position;
+									dxl_motor[0].speed=300;
+									write_velocity_single(0,portHandler1,packetHandler1,dxl_motor);
+								}
+							break;
+							}
+							default:{
+								//check if limit switch touched
+								if(teensy->ch_in[3]==48){
+									dxl_motor[0].speed=0;
+									while(!write_velocity_single(0,portHandler1,packetHandler1,dxl_motor)){}
+									dxl_motor[0].moving=0;
+									sleep(0.2);
+								}
+								//update position
+								while(!read_position_single(0,portHandler1,packetHandler1,dxl_motor)){}
+								if((previous_pos-dxl_motor[0].current_position)>4000)	temp_pos+=4096.0/RESOLUTION_DIVIDER;
+								temp_pos+=(double (dxl_motor[0].current_position-previous_pos))/RESOLUTION_DIVIDER; 
+								previous_pos=dxl_motor[0].current_position; 
+								//ROS_INFO("%f %d",temp_pos, previous_pos);	
+							break;
+							}					
+						}
+					}
+					if(dxl_motor[0].moving!=0){
+						dxl_motor[0].speed=0;
+						while(!write_velocity_single(0,portHandler1,packetHandler1,dxl_motor)){}
+						dxl_motor[0].moving=0;
+						dxl_motor[0].position=(uint32_t) temp_pos;
+						ROS_INFO("DXL 0 position is wrong consider resseting system");
+					}
+					else{dxl_motor[0].position=dxl_motor[0].position_start; lims[0]=temp_pos; ROS_INFO("%f",temp_pos);}
+				}
+			}
+			
+			//2
+			temp_pos=0;
+			if(teensy->cserial_update()){
+				dxl_motor[1].moving=1;
+				if(teensy->ch_in[5]!=48)	dxl_motor[1].speed=1024+300;
+				else if(teensy->ch_in[4]!=48) dxl_motor[1].speed=300;
+				else {ROS_INFO("lim_switch error"); dxl_motor[1].moving=0;}
+				if(dxl_motor[1].moving!=0 && write_velocity_single(1,portHandler1,packetHandler1,dxl_motor)){
+					while(dxl_motor[1].moving!=0 && teensy->cserial_update()){
+						switch(dxl_motor[1].speed>1024){
+							case true:{
+								if(teensy->ch_in[5]==48){
+									dxl_motor[1].speed=1024;
+									write_velocity_single(1,portHandler1,packetHandler1,dxl_motor);
+									sleep(0.2); //wait to stop
+									while(!read_position_single(1,portHandler1,packetHandler1,dxl_motor)){} 										
+									previous_pos=dxl_motor[1].current_position;
+									dxl_motor[1].speed=300;
+									write_velocity_single(1,portHandler1,packetHandler1,dxl_motor);
+								}
+							break;
+							}
+							default:{
+								//check if limit switch touched
+								if(teensy->ch_in[4]==48){
+									dxl_motor[1].speed=0;
+									while(!write_velocity_single(1,portHandler1,packetHandler1,dxl_motor)){}
+									dxl_motor[1].moving=0;
+									sleep(0.2);
+								}
+								//update position
+								while(!read_position_single(1,portHandler1,packetHandler1,dxl_motor)){}
+								if((previous_pos-dxl_motor[1].current_position)>4000)	temp_pos+=4096.0/RESOLUTION_DIVIDER;
+								temp_pos+=(double (dxl_motor[1].current_position-previous_pos))/RESOLUTION_DIVIDER; 
+								previous_pos=dxl_motor[1].current_position; 	
+							break;
+							}					
+						}
+					}
+					if(dxl_motor[1].moving!=0){
+						dxl_motor[1].speed=0;
+						while(!write_velocity_single(1,portHandler1,packetHandler1,dxl_motor)){}
+						dxl_motor[1].moving=0;
+						dxl_motor[1].position=(uint32_t) temp_pos;
+						ROS_INFO("DXL 1 position is wrong consider resseting system");
+					}
+					else{dxl_motor[1].position=dxl_motor[1].position_start; lims[1]=temp_pos; ROS_INFO("%f",temp_pos);}
+				}
+			}
+
+			//5
+			temp_pos=0;
+			if(teensy->cserial_update()){
+				dxl_motor[4].moving=1;
+				if(teensy->ch_in[0]!=48)	dxl_motor[4].speed=1024+150;
+				else if(teensy->ch_in[1]!=48) dxl_motor[4].speed=150;
+				else {ROS_INFO("lim_switch error"); dxl_motor[1].moving=0;}
+				if(dxl_motor[4].moving!=0 && write_velocity_single(4,portHandler2,packetHandler2,dxl_motor)){
+					while(dxl_motor[4].moving!=0 && teensy->cserial_update()){
+						switch(dxl_motor[4].speed>1024){
+							case true:{
+								if(teensy->ch_in[0]==48){
+									dxl_motor[4].speed=1024;
+									write_velocity_single(4,portHandler2,packetHandler2,dxl_motor);
+									sleep(0.2); //wait to stop
+									while(!read_position_single(4,portHandler2,packetHandler2,dxl_motor)){} 										
+									previous_pos=dxl_motor[4].current_position;
+									dxl_motor[4].speed=150;
+									write_velocity_single(4,portHandler2,packetHandler2,dxl_motor);
+								}
+							break;
+							}
+							default:{
+								//check if limit switch touched
+								if(teensy->ch_in[1]==48){
+									dxl_motor[4].speed=0;
+									while(!write_velocity_single(4,portHandler2,packetHandler2,dxl_motor)){}
+									dxl_motor[4].moving=0;
+									sleep(0.2);
+								}
+								//update position
+								while(!read_position_single(4,portHandler2,packetHandler2,dxl_motor)){}
+								if((previous_pos-dxl_motor[4].current_position)>4000)	temp_pos+=4096.0/RESOLUTION_DIVIDER;
+								temp_pos+=(double (dxl_motor[4].current_position-previous_pos))/RESOLUTION_DIVIDER; 
+								previous_pos=dxl_motor[4].current_position; 
+								//ROS_INFO("%f %d",temp_pos, previous_pos);	
+							break;
+							}					
+						}
+					}
+					if(dxl_motor[4].moving!=0){
+						dxl_motor[4].speed=0;
+						while(!write_velocity_single(4,portHandler2,packetHandler2,dxl_motor)){}
+						dxl_motor[4].moving=0;
+						dxl_motor[4].position=(uint32_t) temp_pos;
+						ROS_INFO("DXL 5 position is wrong consider resseting system");
+					}
+					else{dxl_motor[4].position=dxl_motor[4].position_start; lims[2]=temp_pos; ROS_INFO("%f",temp_pos);}
+				}
+			}
+			//publish here?!
+			break;
+		}
+        case DYNAMIXEL_END_PROCESS:{
+            end_program=1;
+            break;
+        }
+        case DYNAMIXEL_STATUS:{
+
+            break;
+        }
+        default:
+        break;
+    }
+}
+
+int main(int argc, char** argv){
+    ros::init(argc,argv,"myDXL_COM");
+    ros::NodeHandle dynamixel_comm; //node that receives commands for dxl and informs controller about status
+    //publish stuff
+    std_msgs::UInt32MultiArray* dynamixel_array_out=new std_msgs::UInt32MultiArray;
+    ros::Publisher dynamixel_out=dynamixel_comm.advertise<std_msgs::UInt32MultiArray>("dxl_2ctrl",2);
+    //subscribe stuff
+    ros::Subscriber dynamixel_in=dynamixel_comm.subscribe("dxl_from_ctrl",2,chatterCallback);
+    //rate
+    ros::Rate loop_rate(RATE);
+    //Initialize actuator params
+    for(uint8_t i=0;i<num_actuators;i++){
+        if(i<NUM_ACTUATORS1)  dxl_motor[i].ID=i+1;
+        else dxl_motor[i].ID=i-NUM_ACTUATORS1+1;
+        dxl_motor[i].mode=0; //always start with position control
+        dxl_motor[i].P=20;
+        dxl_motor[i].I=5;
+        dxl_motor[i].D=0;
+        dxl_motor[i].acceleration=2;
+        dxl_motor[i].speed=0;
+		dxl_motor[i].position_start=0;
+        dxl_motor[i].position=0;
+        dxl_motor[i].health=0;
+        dxl_motor[i].current_torque=0;
+        dxl_motor[i].current_position=0;
+        dxl_motor[i].current_velocity=0;
+        dxl_motor[i].moving=0;
+    }
+    //Deploy custom settings here
+    dxl_motor[0].acceleration=dxl_motor[1].acceleration=dxl_motor[4].acceleration=50;
+
+    //Start serial ports
+    if(init_process()){
+        ROS_INFO("Init process ok");
+        sleep(1);
+        if(startup_position()){
+            dynamixel_array_out->data.push_back((uint32_t) DYNAMIXEL_READY);
+            dynamixel_out.publish(*dynamixel_array_out);
+            dynamixel_array_out->data.clear();
+            ros::spinOnce();
+            loop_rate.sleep();
+            ROS_INFO("Startup process ok");
+            while(ros::ok() && !end_program){
+                char* c=new char[1];
+                if(kbhit(c)==1){
+                }
+                delete c;
+                loop_rate.sleep();
+                ros::spinOnce();
+                //end_program=1;
+            }
+        }
+/*
+		uint16_t val=0;
+		uint8_t error;
+		read_uint16t(packetHandler2,portHandler2,3,20,&val,&error);
+		ROS_INFO("%d",val);
+		read_uint16t(packetHandler2,portHandler2,3,36,&val,&error);
+		ROS_INFO("%d",val);
+		write_uint16t(packetHandler2,portHandler2,3,20,64837,&error);
+*/		
+    }
+    end_process();
+    ROS_INFO("end");
+    return 0;
+}
